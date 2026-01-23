@@ -4,6 +4,17 @@
 
 ---
 
+## 20260123-011181d
+
+- **构建日期**: 2026-01-23T20:00:00+08:00
+- **Git 提交**: `011181de0632efac34e95707e069e8eb2797b8ab`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-011181d`
+- **镜像大小**: 6.08GB
+- **平台**: linux/amd64
+- **修复**: 修复 api.py/demo2.py/export.py 的 `from model import SenseVoiceSmall` 导入错误
+
+---
+
 ## 使用说明
 
 ### 快速构建推送
@@ -44,7 +55,5 @@
 - **优化**: 多阶段构建，Python 虚拟环境，非 root 用户
 
 ---
-
-## 较旧版本
 
 > 历史版本记录将保留在此处
