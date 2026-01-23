@@ -1,24 +1,84 @@
-name: sense
+name: sensevoice
 
 services:
-  sensevoice:
-    container_name: sensevoice
+  sensevoice-api:
+    container_name: sensevoice-api
     build:
       context: .
       dockerfile: Dockerfile
     environment:
+      # 模型缓存目录
       MODELSCOPE_CACHE: /models
-      SENSEVOICE_DEVICE: ${SENSEVOICE_DEVICE:-auto}
+      # 设备选择：cuda/cpu/auto
+      SENSEVOICE_DEVICE: ${SENSEVOICE_DEVICE:-cuda}
+      # Python 环境变量
+      PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: "4"
+      # 临时文件目录
+      TEMP_DIR: /tmp/sensevoice
+      # 日志目录
+      LOG_DIR: /app/logs
+    volumes:
+      # 模型缓存卷
+      - sensevoice-models:/models
+      # 日志卷（可选持久化）
+      - sensevoice-logs:/app/logs
+    ports:
+      # 主 API 服务端口
+      - "${API_PORT:-8000}:8000"
+      # Prometheus metrics 端口（可选择暴露）
+      # - "9090:8000"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # 备用：多副本部署（用于高并发场景）
+  sensevoice-api-scaler:
+    container_name: sensevoice-api-scaler
+    image: sensevoice-api:latest
+    environment:
+      MODELSCOPE_CACHE: /models
+      SENSEVOICE_DEVICE: cuda
+      PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: "4"
     volumes:
       - sensevoice-models:/models
     ports:
-      - "50000:50000"
-    restart: on-failure:5
-    logging:
-      options:
-        max-size: "5m"
-        max-file: "3"
-    gpus: all
+      - "${API_PORT:-8001}:8000"
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - scale
 
 volumes:
   sensevoice-models:
+    driver: local
+  sensevoice-logs:
+    driver: local
+
+networks:
+  default:
+    name: sensevoice-network

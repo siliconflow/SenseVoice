@@ -1,0 +1,23 @@
+# Cog configuration for SenseVoice API Service
+# Build with: cog run -d nvidia/cuda:12.1-cudnn8-devel-ubuntu22.04 python build.py
+
+image: nvidia/cuda:12.1-cudnn8-devel-ubuntu22.04
+
+python_version: "3.10"
+
+pip_install: false
+
+build_steps:
+  - apt-get update && apt-get install -y wget ffmpeg
+  - pip install torch==2.3.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+  - pip install funasr==1.1.3 modelscope huggingface_hub numpy==1.26.4
+  - pip install fastapi uvicorn python-multipart aiofiles
+  - pip install prometheus-client
+
+# Environment variables for runtime
+environment:
+  SENSEVOICE_DEVICE: "cuda"
+  CUDA_MODULE_LOADING: "LAZY"
+  OMP_NUM_THREADS: "4"
+
+predict: "predict.py"
