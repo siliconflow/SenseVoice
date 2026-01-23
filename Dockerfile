@@ -1,100 +1,66 @@
-# =============================================
-# SenseVoice API 服务容器镜像
-# =============================================
-# 构建命令:
-#   docker build -t sensevoice-api:latest .
-#
-# 推送命令:
-#   docker tag sensevoice-api:latest ${REGISTRY}/sensevoice-api:latest
-#   docker push ${REGISTRY}/sensevoice-api:latest
-#
-# 环境变量说明:
-#   MODEL_NAME        - 模型名称，默认 iic/SenseVoiceSmall
-#   SENSEVOICE_DEVICE - 设备类型 (cuda/cpu)
-#   PRELOAD_MODEL     - 是否预加载模型 (1=启动时加载, 0=首次请求时加载)
-# =============================================
+# ==================== SenseVoice API Server ====================
+# 优化版 Dockerfile - 使用多阶段构建减小体积
+# 构建目标: linux/amd64
 
-# 镜像版本信息（可自定义）
-ARG PYTHON_VERSION=3.10
-ARG CUDA_VERSION=12.1
-ARG CUDNN_VERSION=8
+# ==================== 阶段1: 构建依赖 ====================
+FROM python:3.10-slim-bookworm AS builder
 
-# =============================================
-# 阶段1: 构建依赖 (builder)
-# =============================================
-FROM python:${PYTHON_VERSION}-slim AS builder
+WORKDIR /build
 
-WORKDIR /app
-
-# 安装构建依赖
+# 安装 build 依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
-# 复制依赖文件并构建 wheel 缓存
+# 创建虚拟环境
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# 安装依赖
 COPY requirements.txt .
-RUN pip wheel --no-cache-dir --wheel-dir /app/wheels -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# =============================================
-# 阶段2: 运行镜像 (runtime)
-# =============================================
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-runtime-ubuntu22.04
+# ==================== 阶段2: 运行镜像 ====================
+FROM python:3.10-slim-bookworm AS runtime
 
-LABEL maintainer="SenseVoice" \
-      description="SenseVoice API Service - OpenAI Compatible Speech-to-Text" \
-      version="1.0.0" \
-      org.opencontainers.image.source="https://github.com/FunAudioLLM/SenseVoice"
-
-# 安装系统运行时依赖
+# 安装运行时依赖 (不含 CUDA，由运行时环境提供)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3-pip \
-    ffmpeg \
-    wget \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# 从构建阶段复制 wheels
-COPY --from=builder /app/wheels /app/wheels
-
-# 安装 Python 依赖（使用预编译的 wheels 以加速构建）
-RUN pip install --no-cache-dir --find-links /app/wheels -r /app/wheels/../requirements.txt && \
-    rm -rf /app/wheels
-
-# 安装 FastAPI 运行时依赖
-RUN pip install --no-cache-dir \
-    fastapi>=0.111.1 \
-    uvicorn>=0.27.0 \
-    python-multipart>=0.0.6 \
-    aiofiles>=23.2.1 \
-    prometheus-client>=0.20.0
+# 从 builder 复制虚拟环境
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # 设置工作目录
 WORKDIR /app
-COPY . .
 
-# 创建必要目录
-RUN mkdir -p /tmp/sensevoice /app/models /app/logs && chmod -R 777 /tmp/sensevoice /app/models /app/logs
+# 复制应用代码
+COPY api.py .
+COPY utils/ ./utils/
 
-# 设置环境变量
+# 创建非 root 用户
+RUN useradd -m -s /bin/bash appuser && \
+    chown -R appuser:appuser /app && \
+    mkdir -p /models /tmp/sensevoice /app/logs && \
+    chown -R appuser:appuser /models /tmp/sensevoice /app/logs
+
+USER appuser
+
+# 环境变量
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
     OMP_NUM_THREADS=4 \
-    TOKENIZERS_PARALLELISM="false" \
-    CUDA_MODULE_LOADING=LAZY \
-    CUDA_LAUNCH_BLOCKING=0 \
-    MODELSCOPE_CACHE="/app/models" \
-    HF_HOME="/tmp/.cache" \
-    LOG_DIR="/app/logs" \
+    TEMP_DIR=/tmp/sensevoice \
+    LOG_DIR=/app/logs \
+    MODELSCOPE_CACHE=/models \
+    HF_HOME=/tmp/.cache \
     SENSEVOICE_DEVICE="cuda"
 
-# 暴露端口
-EXPOSE 8000
-
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
 
-# 启动入口
-ENTRYPOINT ["python", "openai_api.py"]
-CMD ["--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# 默认启动命令
+CMD ["python", "api.py"]
