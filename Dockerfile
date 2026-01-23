@@ -3,7 +3,7 @@
 # Build target: linux/amd64
 
 # ==================== Stage 1: Build dependencies ====================
-FROM docker.m.daocloud.io/library/python:3.10-slim-bookworm AS builder
+FROM mirror.gcr.io/library/python:3.10-slim-bookworm AS builder
 
 # Use Aliyun mirror for apt
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
@@ -27,7 +27,7 @@ RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip install --no-cache-dir -r requirements.txt
 
 # ==================== Stage 2: Runtime image ====================
-FROM docker.m.daocloud.io/library/python:3.10-slim-bookworm AS runtime
+FROM mirror.gcr.io/library/python:3.10-slim-bookworm AS runtime
 
 # Use Aliyun mirror for apt
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
