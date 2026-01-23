@@ -1,46 +1,67 @@
-# SenseVoice API 服务容器镜像 - 支持 NVIDIA GPU、OpenAI 兼容 API
-# 编译命令: docker build -t sensevoice-api .
-# 运行命令: docker run -d --gpus all -p 8000:8000 sensevoice-api
+# =============================================
+# SenseVoice API 服务容器镜像
+# =============================================
+# 构建命令:
+#   docker build -t sensevoice-api:latest .
+#
+# 推送命令:
+#   docker tag sensevoice-api:latest ${REGISTRY}/sensevoice-api:latest
+#   docker push ${REGISTRY}/sensevoice-api:latest
+#
+# 环境变量说明:
+#   MODEL_NAME        - 模型名称，默认 iic/SenseVoiceSmall
+#   SENSEVOICE_DEVICE - 设备类型 (cuda/cpu)
+#   PRELOAD_MODEL     - 是否预加载模型 (1=启动时加载, 0=首次请求时加载)
+# =============================================
 
-# ============== 构建阶段 ==============
-FROM nvidia/cuda:12.1-cudnn8-devel-ubuntu22.04 as builder
+# 镜像版本信息（可自定义）
+ARG PYTHON_VERSION=3.10
+ARG CUDA_VERSION=12.1
+ARG CUDNN_VERSION=8
 
-WORKDIR /workspace
+# =============================================
+# 阶段1: 构建依赖 (builder)
+# =============================================
+FROM python:${PYTHON_VERSION}-slim AS builder
 
-# 安装系统依赖
+WORKDIR /app
+
+# 安装构建依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    ffmpeg \
-    ca-certificates \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 3.10
+# 复制依赖文件并构建 wheel 缓存
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /app/wheels -r requirements.txt
+
+# =============================================
+# 阶段2: 运行镜像 (runtime)
+# =============================================
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-runtime-ubuntu22.04
+
+LABEL maintainer="SenseVoice" \
+      description="SenseVoice API Service - OpenAI Compatible Speech-to-Text" \
+      version="1.0.0" \
+      org.opencontainers.image.source="https://github.com/FunAudioLLM/SenseVoice"
+
+# 安装系统运行时依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
-    python3.10-dev \
-    python3.10-venv \
-    pip \
+    python3-pip \
+    ffmpeg \
+    wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 创建虚拟环境
-RUN python3.10 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# 从构建阶段复制 wheels
+COPY --from=builder /app/wheels /app/wheels
 
-# 升级 pip
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# 安装 Python 依赖（使用预编译的 wheels 以加速构建）
+RUN pip install --no-cache-dir --find-links /app/wheels -r /app/wheels/../requirements.txt && \
+    rm -rf /app/wheels
 
-# 安装 PyTorch (CUDA 12.1)
-RUN pip install --no-cache-dir \
-    torch==2.3.0 \
-    torchvision==0.18.0 \
-    torchaudio==2.3.0 \
-    --index-url https://download.pytorch.org/whl/cu121
-
-# 复制并安装依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# 安装额外依赖（API 服务）
+# 安装 FastAPI 运行时依赖
 RUN pip install --no-cache-dir \
     fastapi>=0.111.1 \
     uvicorn>=0.27.0 \
@@ -48,52 +69,30 @@ RUN pip install --no-cache-dir \
     aiofiles>=23.2.1 \
     prometheus-client>=0.20.0
 
-# ============== 运行阶段 ==============
-FROM nvidia/cuda:12.1-cudnn8-runtime-ubuntu22.04
-
-LABEL maintainer="SenseVoice" \
-      description="SenseVoice API Service - OpenAI Compatible Speech-to-Text"
-
-WORKDIR /workspace
-
-# 安装系统运行时依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    ffmpeg \
-    python3.10 \
-    python3-pip \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制虚拟环境
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# 设置 Python 环境变量
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    OMP_NUM_THREADS=4 \
-    CUDA_MODULE_LOADING=LAZY \
-    CUDA_LAUNCH_BLOCKING=0
-
 # 设置工作目录
 WORKDIR /app
-COPY . /app
+COPY . .
 
 # 创建必要目录
 RUN mkdir -p /tmp/sensevoice /app/models /app/logs && chmod -R 777 /tmp/sensevoice /app/models /app/logs
 
 # 设置环境变量
-ENV SENSEVOICE_DEVICE="cuda" \
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    OMP_NUM_THREADS=4 \
     TOKENIZERS_PARALLELISM="false" \
+    CUDA_MODULE_LOADING=LAZY \
+    CUDA_LAUNCH_BLOCKING=0 \
     MODELSCOPE_CACHE="/app/models" \
-    LOG_DIR="/app/logs"
+    HF_HOME="/tmp/.cache" \
+    LOG_DIR="/app/logs" \
+    SENSEVOICE_DEVICE="cuda"
 
-# 暴露端口（Prometheus metrics 与主 API 同端口，通过 /metrics 路径暴露）
+# 暴露端口
 EXPOSE 8000
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
 
 # 启动入口

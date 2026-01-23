@@ -118,6 +118,39 @@ _executor = ThreadPoolExecutor(max_workers=30)  # 支持30并发
 request_counter_lock = threading.Lock()
 
 
+def get_model_name():
+    """获取模型名称，可通过环境变量自定义"""
+    return os.environ.get("MODEL_NAME", "iic/SenseVoiceSmall")
+
+
+def preload_model():
+    """预下载模型权重（不加载到内存，仅下载到缓存目录）"""
+    model_name = get_model_name()
+    logger.info(f"开始预下载模型: {model_name}")
+
+    try:
+        from modelscope import snapshot_download
+        from funasr import AutoModel
+
+        # 使用 modelscope 下载模型到缓存目录
+        cache_dir = os.environ.get("MODELSCOPE_CACHE", "/app/models")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # 下载模型（不加载到内存）
+        logger.info(f"从 ModelScope 下载模型到 {cache_dir} ...")
+        model_path = snapshot_download(
+            model_name,
+            cache_dir=cache_dir,
+            allow_file_pattern=["*.bin", "*.safetensors", "*.pt", "*.py"],
+        )
+        logger.info(f"模型预下载完成: {model_path}")
+
+        return True
+    except Exception as e:
+        logger.error(f"模型预下载失败: {e}")
+        return False
+
+
 def load_model():
     """加载模型（线程安全，单例模式）"""
     global model
@@ -137,8 +170,15 @@ def load_model():
         device = os.environ.get("SENSEVOICE_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"使用设备: {device}")
 
+        # 检查是否只需要预下载
+        if os.environ.get("ONLY_PRELOAD", "0") == "1":
+            logger.info("ONLY_PRELOAD=1，仅执行模型预下载，不加载到内存")
+            preload_model()
+            logger.info("预下载完成，退出进程")
+            sys.exit(0)
+
         model = AutoModel(
-            model="iic/SenseVoiceSmall",
+            model=get_model_name(),
             trust_remote_code=True,
             device=device,
         )
@@ -440,6 +480,12 @@ async def process_audio(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    # 可选：启动时预下载模型
+    preload_on_start = os.environ.get("PRELOAD_MODEL_ON_START", "0") == "1"
+    if preload_on_start:
+        logger.info("PRELOAD_MODEL_ON_START=1，执行模型预下载...")
+        preload_model()
+
     # 启动时加载模型（在主进程中）
     load_model()
     logger.info("SenseVoice API 服务启动完成，模型就绪")
