@@ -1,47 +1,44 @@
-#!/usr/bin/env python3
-# -*- encoding: utf-8 -*-
-# Copyright FunASR (https://github.com/FunAudioLLM/SenseVoice). All Rights Reserved.
-#  MIT License  (https://opensource.org/licenses/MIT)
-
 import os
 import torch
-from model import SenseVoiceSmall
+from funasr import AutoModel
 from utils import export_utils
 from utils.model_bin import SenseVoiceSmallONNX
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
-quantize = False
-
 model_dir = "iic/SenseVoiceSmall"
-model, kwargs = SenseVoiceSmall.from_pretrained(model=model_dir, device="cuda:0")
+
+model_wrapper = AutoModel(
+    model=model_dir,
+    trust_remote_code=True,
+    remote_code="./model.py",
+    vad_model="fsmn-vad",
+    vad_kwargs={"max_single_segment_time": 30000},
+    device="cuda:0",
+)
+
+model = model_wrapper.model
+model_path = os.path.dirname(model_wrapper.model_path)
 
 rebuilt_model = model.export(type="onnx", quantize=False)
-model_path = kwargs.get("output_dir", os.path.dirname(kwargs.get("init_param")))
+exported_model_file = os.path.join(model_path, "model.onnx")
+print("Export model onnx to {}".format(exported_model_file))
 
-model_file = os.path.join(model_path, "model.onnx")
-if quantize:
-    model_file = os.path.join(model_path, "model_quant.onnx")
+export_utils.export(model=rebuilt_model, output_dir=model_path)
+print("Export meta to {}".format(os.path.join(model_path, "config.yaml")))
 
-# export model
-if not os.path.exists(model_file):
-    with torch.no_grad():
-        del kwargs['model']
-        export_dir = export_utils.export(model=rebuilt_model, **kwargs)
-        print("Export model onnx to {}".format(model_file))
-        
-# export model init
 model_bin = SenseVoiceSmallONNX(model_path)
 
-# build tokenizer
 try:
     from funasr.tokenizer.sentencepiece_tokenizer import SentencepiecesTokenizer
     tokenizer = SentencepiecesTokenizer(bpemodel=os.path.join(model_path, "chn_jpn_yue_eng_ko_spectok.bpe.model"))
 except:
     tokenizer = None
 
-# inference
-wav_or_scp = "/Users/shixian/Downloads/asr_example_hotword.wav"
-language_list = [0]
-textnorm_list = [15]
-res = model_bin(wav_or_scp, language_list, textnorm_list, tokenizer=tokenizer)
+text = ["<|woitn|><|NEUTRAL|><|zh|>你好世界"]
+print("src_text: {}".format(text))
+tokens = tokenizer.encode(text)
+print("token: {}".format(tokens))
+
+res = model_bin(wav_or_scp=tokenizer, language_list=[3], textnorm_list=[15])
+print("infer res: {}".format(res))
 print([rich_transcription_postprocess(i) for i in res])

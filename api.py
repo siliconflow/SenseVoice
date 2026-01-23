@@ -8,7 +8,7 @@ from typing_extensions import Annotated
 from typing import List
 from enum import Enum
 import torchaudio
-from model import SenseVoiceSmall
+from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
 from io import BytesIO
 
@@ -26,8 +26,14 @@ class Language(str, Enum):
 
 
 model_dir = "iic/SenseVoiceSmall"
-m, kwargs = SenseVoiceSmall.from_pretrained(model=model_dir, device=os.getenv("SENSEVOICE_DEVICE", "cuda:0"))
-m.eval()
+model = AutoModel(
+    model=model_dir,
+    trust_remote_code=True,
+    remote_code="./model.py",
+    vad_model="fsmn-vad",
+    vad_kwargs={"max_single_segment_time": 30000},
+    device=os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
+)
 
 regex = r"<\|.*\|>"
 
@@ -77,22 +83,21 @@ async def turn_audio_to_text(
     else:
         key = keys.split(",")
 
-    res = m.inference(
-        data_in=audios,
+    res = model.generate(
+        input=audios,
         language=lang,  # "zh", "en", "yue", "ja", "ko", "nospeech"
         use_itn=False,
-        ban_emo_unk=False,
-        key=key,
-        fs=TARGET_FS,
-        **kwargs,
+        batch_size_s=60,
     )
-    if len(res) == 0:
-        return {"result": []}
-    for it in res[0]:
-        it["raw_text"] = it["text"]
-        it["clean_text"] = re.sub(regex, "", it["text"], 0, re.MULTILINE)
-        it["text"] = rich_transcription_postprocess(it["text"])
-    return {"result": res[0]}
+    result = []
+    for r in res:
+        text = r["text"]
+        result.append({
+            "raw_text": text,
+            "clean_text": re.sub(regex, "", text, 0, re.MULTILINE),
+            "text": rich_transcription_postprocess(text),
+        })
+    return {"result": result}
 
 
 if __name__ == "__main__":
