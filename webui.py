@@ -13,13 +13,22 @@ import torchaudio
 
 
 from funasr import AutoModel
+import os
 
 model = "iic/SenseVoiceSmall"
-model = AutoModel(model=model,
-				  vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-				  vad_kwargs={"max_single_segment_time": 30000},
-				  trust_remote_code=True,
-				  )
+model_kwargs = {
+    "model": model,
+    "vad_model": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+    "vad_kwargs": {"max_single_segment_time": 30000},
+    "trust_remote_code": True,
+}
+
+# 支持通过环境变量配置标点模型
+_use_punc = os.getenv("SENSEVOICE_USE_PUNC", "true").lower() == "true"
+if _use_punc:
+    model_kwargs["punc_model"] = os.getenv("SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch")
+
+model = AutoModel(**model_kwargs)
 
 import re
 

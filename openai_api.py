@@ -177,11 +177,20 @@ def load_model():
             logger.info("预下载完成，退出进程")
             sys.exit(0)
 
-        model = AutoModel(
-            model=get_model_name(),
-            trust_remote_code=True,
-            device=device,
-        )
+        model_kwargs = {
+            "model": get_model_name(),
+            "trust_remote_code": True,
+            "device": device,
+        }
+
+        # 支持通过环境变量配置标点模型
+        use_punc = os.environ.get("SENSEVOICE_USE_PUNC", "true").lower() == "true"
+        if use_punc:
+            model_kwargs["punc_model"] = os.environ.get(
+                "SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch"
+            )
+
+        model = AutoModel(**model_kwargs)
 
         load_time = time.time() - load_start
         MODEL_LOAD_TIME.observe(load_time)

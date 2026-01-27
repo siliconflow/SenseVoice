@@ -148,15 +148,26 @@ class Language(str, Enum):
 
 
 model_dir = "iic/SenseVoiceSmall"
+
+# 标点模型配置
+_use_punc = os.getenv("SENSEVOICE_USE_PUNC", "true").lower() == "true"
+_punc_model = os.getenv("SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch")
+
 try:
-    model = AutoModel(
-        model=model_dir,
-        trust_remote_code=True,
-        remote_code="./model.py",
-        vad_model="fsmn-vad",
-        vad_kwargs={"max_single_segment_time": 30000},
-        device=os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
-    )
+    model_kwargs = {
+        "model": model_dir,
+        "trust_remote_code": True,
+        "remote_code": "./model.py",
+        "vad_model": "fsmn-vad",
+        "vad_kwargs": {"max_single_segment_time": 30000},
+        "device": os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
+    }
+
+    # 仅在启用标点功能时加载标点模型
+    if _use_punc:
+        model_kwargs["punc_model"] = _punc_model
+
+    model = AutoModel(**model_kwargs)
     _model_loaded = True
 except Exception as e:
     _model_load_error = str(e)

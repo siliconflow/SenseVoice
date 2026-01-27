@@ -5,18 +5,25 @@
 
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
+import os
 
 model_dir = "iic/SenseVoiceSmall"
 
+model_kwargs = {
+    "model": model_dir,
+    "trust_remote_code": True,
+    "remote_code": "./model.py",
+    "vad_model": "fsmn-vad",
+    "vad_kwargs": {"max_single_segment_time": 30000},
+    "device": os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
+}
 
-model = AutoModel(
-    model=model_dir,
-    trust_remote_code=True,
-    remote_code="./model.py",
-    vad_model="fsmn-vad",
-    vad_kwargs={"max_single_segment_time": 30000},
-    device="cuda:0",
-)
+# 支持通过环境变量配置标点模型
+_use_punc = os.getenv("SENSEVOICE_USE_PUNC", "true").lower() == "true"
+if _use_punc:
+    model_kwargs["punc_model"] = os.getenv("SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch")
+
+model = AutoModel(**model_kwargs)
 
 # en
 res = model.generate(
