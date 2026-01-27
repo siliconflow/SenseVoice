@@ -4,15 +4,41 @@
 
 ---
 
+## 20260128-cf2f9bf
+
+- **构建日期**: 2026-01-28
+- **Git 提交**: `cf2f9bfad1f68a1c389d33a0501b0a4e53431941`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260128-cf2f9bf`
+- **镜像标签**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:latest`
+- **镜像大小**: 6.08GB
+- **平台**: linux/amd64
+- **Bug 修复**:
+  - 添加缺失的 `psutil` 和 `httpx` 依赖到 requirements.txt
+
+---
+
+## 20260127-cf2f9bf
+
+- **构建日期**: 2026-01-27
+- **Git 提交**: `cf2f9bfad1f68a1c389d33a0501b0a4e53431941`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260127-cf2f9bf`
+- **镜像标签**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:latest`
+- **镜像大小**: 6.08GB
+- **平台**: linux/amd64
+- **变更内容**:
+  - 缓存文件清理：延迟清理临时音频文件，支持环境变量配置
+  - 请求信息记录：记录接口、trace id、音频元信息
+  - 健康检查：增加 `/health` 和 `/ready` 接口
+  - API 文档更新
+  - 标点控制：支持环境变量 `SENSEVOICE_USE_PUNC` 和 `SENSEVOICE_PUNC_MODEL`
+
+---
+
 ## 20260126-d2d4a64
 
 - **构建日期**: 2026-01-26T20:39:26+08:00
 - **Git 提交**: `d2d4a64d5da3f8f296d82e554a0d496ed24a7385`
-- **镜像地址**: `[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64
-[0;34m[INFO][0m 构建日期: 2026-01-26T20:21:50+08:00
-[0;34m[INFO][0m Git 提交: d2d4a64d5da3f8f296d82e554a0d496ed24a7385
-[0;32m[SUCCESS][0m 镜像构建并推送成功: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64
-hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64`
 - **镜像大小**: unknown
 - **平台**: linux/amd64
 
@@ -22,37 +48,7 @@ hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64`
 
 - **构建日期**: 2026-01-23T19:10:32+08:00
 - **Git 提交**: `8eb7f1a358370a94836a5d4f6b7a34dc5df428de`
-- **镜像地址**: `[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-8eb7f1a
-[0;34m[INFO][0m 构建日期: 2026-01-23T18:45:37+08:00
-[0;34m[INFO][0m Git 提交: 8eb7f1a358370a94836a5d4f6b7a34dc5df428de
-[0;32m[SUCCESS][0m 镜像构建并推送成功: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-8eb7f1a
-hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-8eb7f1a`
-- **镜像大小**: unknown
-- **平台**: linux/amd64
-
----
-
-## 20260123-8eb7f1a
-
-- **构建日期**: 2026-01-23T18:44:02+08:00
-- **Git 提交**: `8eb7f1a358370a94836a5d4f6b7a34dc5df428de`
-- **镜像地址**: `[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-8eb7f1a
-[0;34m[INFO][0m 构建日期: 2026-01-23T18:44:00+08:00
-[0;34m[INFO][0m Git 提交: 8eb7f1a358370a94836a5d4f6b7a34dc5df428de
-[0;31m[ERROR][0m 镜像构建失败`
-- **镜像大小**: unknown
-- **平台**: linux/amd64
-
----
-
-## 20260123-8eb7f1a
-
-- **构建日期**: 2026-01-23T18:43:44+08:00
-- **Git 提交**: `8eb7f1a358370a94836a5d4f6b7a34dc5df428de`
-- **镜像地址**: `[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-8eb7f1a
-[0;34m[INFO][0m 构建日期: 2026-01-23T18:43:34+08:00
-[0;34m[INFO][0m Git 提交: 8eb7f1a358370a94836a5d4f6b7a34dc5df428de
-[0;31m[ERROR][0m 镜像构建失败`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-8eb7f1a`
 - **镜像大小**: unknown
 - **平台**: linux/amd64
 
