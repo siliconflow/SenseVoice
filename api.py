@@ -7,7 +7,8 @@ import httpx
 import psutil
 import time
 import torch
-from fastapi import FastAPI, File, Form, UploadFile
+import logging
+from fastapi import FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing_extensions import Annotated
@@ -17,8 +18,123 @@ import torchaudio
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
 from io import BytesIO
+from dataclasses import dataclass
 
 TARGET_FS = 16000
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AudioMetadata:
+    """音频文件元信息"""
+    extension: str = ""
+    encoding: str = ""
+    sample_rate: int = 0
+    duration_seconds: float = 0.0
+    file_size: int = 0
+    num_channels: int = 0
+    num_tracks: int = 0
+
+
+def log_request_info(request: Request, endpoint: str, extra_info: dict = None):
+    """记录请求信息"""
+    # 1. 记录请求的具体接口
+    client_host = request.client.host if request.client else "unknown"
+    headers = request.headers
+
+    # 2. 读取并记录 trace id headers
+    trace_ids = {
+        "X-Trace-Id": headers.get("X-Trace-Id"),
+        "x-siliconcloud-trace-id": headers.get("x-siliconcloud-trace-id"),
+    }
+
+    log_msg = f"[{endpoint}] Request from {client_host}"
+    log_msg += f" | Trace-Ids: {trace_ids}"
+
+    if extra_info:
+        log_msg += f" | Extra: {extra_info}"
+
+    logger.info(log_msg)
+
+
+def extract_audio_metadata(file, file_io: BytesIO, audio_fs: int = None) -> AudioMetadata:
+    """提取音频文件的元信息"""
+    metadata = AudioMetadata()
+
+    # 文件扩展名
+    if hasattr(file, 'filename') and file.filename:
+        filename = file.filename
+        metadata.extension = filename.split('.')[-1].lower() if '.' in filename else ""
+    elif isinstance(file, str):
+        if file.startswith('data:'):
+            mime_type = file.split(';')[0].split(':')[-1] if ';' in file else ""
+            metadata.extension = mime_type.split('/')[-1] if '/' in mime_type else ""
+        elif file.startswith('http://') or file.startswith('https://'):
+            metadata.extension = file.split('?')[0].split('.')[-1].lower() if '.' in file.split('?')[0] else "unknown"
+        else:
+            metadata.extension = "base64"
+
+    # 文件大小
+    if hasattr(file, 'size'):
+        metadata.file_size = file.size
+    else:
+        pos = file_io.tell()
+        file_io.seek(0, 2)
+        metadata.file_size = file_io.tell()
+        file_io.seek(pos)
+
+    # 音频流信息
+    try:
+        info = torchaudio.info(file_io)
+        metadata.sample_rate = info.sample_rate
+        metadata.num_channels = info.num_channels
+        metadata.num_tracks = info.num_frames if hasattr(info, 'num_frames') else 1
+        metadata.duration_seconds = metadata.num_tracks / info.sample_rate if info.sample_rate > 0 else 0
+    except Exception:
+        if audio_fs:
+            metadata.sample_rate = audio_fs
+            metadata.duration_seconds = 0
+
+    # 编码信息
+    if hasattr(file, 'filename') and file.filename:
+        metadata.encoding = "file_upload"
+    elif isinstance(file, str):
+        if file.startswith('data:'):
+            metadata.encoding = "base64"
+        elif file.startswith('http://') or file.startswith('https://'):
+            metadata.encoding = "url"
+        else:
+            metadata.encoding = "base64"
+
+    return metadata
+
+
+def format_file_size(size_bytes: int) -> str:
+    """将字节转换为易读的单位"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def format_audio_metadata(metadata: AudioMetadata) -> dict:
+    """格式化音频元信息用于日志"""
+    return {
+        "extension": metadata.extension,
+        "encoding": metadata.encoding,
+        "sample_rate": f"{metadata.sample_rate}Hz",
+        "duration_seconds": round(metadata.duration_seconds, 2),
+        "file_size": format_file_size(metadata.file_size),
+        "num_channels": metadata.num_channels,
+    }
 
 
 class Language(str, Enum):
@@ -183,11 +299,15 @@ async def root():
 
 @app.post("/api/v1/asr")
 async def turn_audio_to_text(
+    request: Request,
     files: Annotated[List[UploadFile], File(description="wav or mp3 audios in 16KHz")],
     keys: Annotated[str, Form(description="name of each audio joined with comma")] = None,
     lang: Annotated[Language, Form(description="language of audio content")] = "auto",
 ):
-    result = await audio_to_text(files, lang)
+    # 记录请求信息
+    log_request_info(request, "/api/v1/asr")
+
+    result = await audio_to_text(files, lang, request)
     global _last_request_time
     _last_request_time = time.time()  # 更新最后请求时间
     return {"result": result}
@@ -220,39 +340,56 @@ async def load_audio_input(file) -> BytesIO:
     raise ValueError(f"无法识别的音频文件格式")
 
 
-async def audio_to_text(files: list, lang: str = "auto"):
+async def audio_to_text(files: list, lang: str = "auto", request: Request = None):
     """通用音频转文字逻辑"""
-    audios = []
-    for f in files:
-        file_io = await load_audio_input(f)
-        data_or_path_or_list, audio_fs = torchaudio.load(file_io)
+    endpoint = request.url.path if request else "unknown"
 
-        # transform to target sample
-        if audio_fs != TARGET_FS:
-            resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
-            data_or_path_or_list = resampler(data_or_path_or_list)
+    try:
+        audios = []
+        audio_infos = []
+        for f in files:
+            file_io = await load_audio_input(f)
+            data_or_path_or_list, audio_fs = torchaudio.load(file_io)
 
-        data_or_path_or_list = data_or_path_or_list.mean(0)
-        audios.append(data_or_path_or_list)
+            # 提取并记录音频元信息
+            audio_meta = extract_audio_metadata(f, file_io, audio_fs)
+            audio_infos.append(format_audio_metadata(audio_meta))
 
-    if lang == "":
-        lang = "auto"
+            # transform to target sample
+            if audio_fs != TARGET_FS:
+                resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
+                data_or_path_or_list = resampler(data_or_path_or_list)
 
-    res = model.generate(
-        input=audios,
-        language=lang,
-        use_itn=False,
-        batch_size_s=60,
-    )
-    result = []
-    for r in res:
-        text = r["text"]
-        result.append({
-            "raw_text": text,
-            "clean_text": re.sub(regex, "", text, 0, re.MULTILINE),
-            "text": rich_transcription_postprocess(text),
-        })
-    return result
+            data_or_path_or_list = data_or_path_or_list.mean(0)
+            audios.append(data_or_path_or_list)
+
+        # 记录音频信息
+        if request is not None:
+            for i, info in enumerate(audio_infos):
+                logger.info(f"[{endpoint}] Audio {i+1}: {info}")
+
+        if lang == "":
+            lang = "auto"
+
+        res = model.generate(
+            input=audios,
+            language=lang,
+            use_itn=False,
+            batch_size_s=60,
+        )
+        result = []
+        for r in res:
+            text = r["text"]
+            result.append({
+                "raw_text": text,
+                "clean_text": re.sub(regex, "", text, 0, re.MULTILINE),
+                "text": rich_transcription_postprocess(text),
+            })
+        return result
+
+    except Exception as e:
+        logger.error(f"[{endpoint}] Request failed: {type(e).__name__}: {str(e)}")
+        raise
 
 
 class SiliconFlowResponse(BaseModel):
@@ -262,6 +399,7 @@ class SiliconFlowResponse(BaseModel):
 @app.post("/v1/audio/transcriptions", response_model=SiliconFlowResponse)
 @app.post("/audio/transcriptions", response_model=SiliconFlowResponse)
 async def siliconflow_transcribe(
+    request: Request,
     file: Union[UploadFile, str] = File(..., description="Audio file: file upload, base64 encode, or URL"),
     model: str = Form(default="FunAudioLLM/SenseVoiceSmall", description="Model name"),
     language: str = Form(default=None, description="Language (auto, zh, en, yue, ja, ko)"),
@@ -277,15 +415,49 @@ async def siliconflow_transcribe(
     - 自动重采样至 16kHz
     - 返回可读文本（含标点）
     """
-    if language:
-        lang = language
-    else:
-        lang = "auto"
+    # 获取请求路径
+    endpoint = request.url.path
+    client_host = request.client.host if request.client else "unknown"
+    headers = request.headers
 
-    result = await audio_to_text([file], lang)
-    global _last_request_time
-    _last_request_time = time.time()  # 更新最后请求时间
-    return SiliconFlowResponse(text=result[0]["text"])
+    logger.info(f"[{endpoint}] Request received from {client_host}")
+
+    try:
+        # 记录 trace id
+        trace_ids = {
+            "X-Trace-Id": headers.get("X-Trace-Id"),
+            "x-siliconcloud-trace-id": headers.get("x-siliconcloud-trace-id"),
+        }
+        logger.info(f"[{endpoint}] Trace-Ids: {trace_ids}")
+
+        if language:
+            lang = language
+        else:
+            lang = "auto"
+
+        # 提取音频元信息
+        file_io = await load_audio_input(file)
+        audio_meta = extract_audio_metadata(file, file_io)
+        logger.info(f"[{endpoint}] Audio metadata: {format_audio_metadata(audio_meta)}")
+
+        result = await audio_to_text([file], lang, request)
+<<<<<<< HEAD
+
+        global _last_request_time
+        _last_request_time = time.time()  # 更新最后请求时间
+=======
+>>>>>>> e5f969e (Let me verify `httpx` is properly imported:)
+        return SiliconFlowResponse(text=result[0]["text"])
+
+    except ValueError as ve:
+        logger.warning(f"[{endpoint}] Invalid request: {str(ve)}")
+        raise
+    except httpx.HTTPStatusError as he:
+        logger.error(f"[{endpoint}] HTTP error fetching remote file: {str(he)}")
+        raise
+    except Exception as e:
+        logger.error(f"[{endpoint}] Processing failed: {type(e).__name__}: {str(e)}")
+        raise
 
 
 if __name__ == "__main__":
