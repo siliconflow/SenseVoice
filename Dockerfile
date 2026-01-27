@@ -48,6 +48,7 @@ WORKDIR /app
 
 # Copy application code
 COPY api.py .
+COPY model.py .
 COPY utils/ ./utils/
 
 # Create non-root user

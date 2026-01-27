@@ -4,6 +4,20 @@
 
 ---
 
+## 20260126-d2d4a64
+
+- **构建日期**: 2026-01-26T20:39:26+08:00
+- **Git 提交**: `d2d4a64d5da3f8f296d82e554a0d496ed24a7385`
+- **镜像地址**: `[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64
+[0;34m[INFO][0m 构建日期: 2026-01-26T20:21:50+08:00
+[0;34m[INFO][0m Git 提交: d2d4a64d5da3f8f296d82e554a0d496ed24a7385
+[0;32m[SUCCESS][0m 镜像构建并推送成功: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64
+hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64`
+- **镜像大小**: unknown
+- **平台**: linux/amd64
+
+---
+
 ## 20260123-8eb7f1a
 
 - **构建日期**: 2026-01-23T19:10:32+08:00
