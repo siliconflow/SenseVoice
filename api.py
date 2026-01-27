@@ -4,6 +4,9 @@
 import os, re
 import base64
 import httpx
+import psutil
+import time
+import torch
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -29,18 +32,137 @@ class Language(str, Enum):
 
 
 model_dir = "iic/SenseVoiceSmall"
-model = AutoModel(
-    model=model_dir,
-    trust_remote_code=True,
-    remote_code="./model.py",
-    vad_model="fsmn-vad",
-    vad_kwargs={"max_single_segment_time": 30000},
-    device=os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
-)
+try:
+    model = AutoModel(
+        model=model_dir,
+        trust_remote_code=True,
+        remote_code="./model.py",
+        vad_model="fsmn-vad",
+        vad_kwargs={"max_single_segment_time": 30000},
+        device=os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
+    )
+    _model_loaded = True
+except Exception as e:
+    _model_load_error = str(e)
+    _model_loaded = False
 
 regex = r"<\|.*\|>"
 
 app = FastAPI()
+
+
+_model_load_error = None
+_last_request_time = 0  # 上次成功请求的时间戳
+AUDIO_TEST_DIR = "test_audios"
+AUDIO_TEST_COOLDOWN_SECONDS = 30  # 30 秒内有成功请求则跳过推理测试
+
+
+def _perform_inference_test():
+    """执行实际的模型推理测试"""
+    import glob
+
+    # 查找测试音频文件
+    audio_patterns = [f"{AUDIO_TEST_DIR}/*.wav", f"{AUDIO_TEST_DIR}/*.mp3", f"{AUDIO_TEST_DIR}/*.flac"]
+    test_files = []
+    for pattern in audio_patterns:
+        test_files.extend(glob.glob(pattern))
+
+    if not test_files:
+        return None, "no_test_audio"
+
+    try:
+        test_file = test_files[0]
+        waveform, audio_fs = torchaudio.load(test_file)
+
+        # 重采样至 16kHz
+        if audio_fs != TARGET_FS:
+            resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
+            waveform = resampler(waveform)
+
+        waveform = waveform.mean(0)
+
+        # 执行推理
+        res = model.generate(
+            input=[waveform],
+            language="auto",
+            use_itn=False,
+            batch_size_s=60,
+        )
+
+        return {"text": res[0].get("text", "")}, None
+    except Exception as e:
+        return None, str(e)
+
+
+@app.get("/health")
+async def health():
+    """存活健康检查 (Liveness Probe)"""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready():
+    """就绪健康检查 (Readiness Probe) - 检查模型和系统状态"""
+    global _last_request_time
+    current_time = time.time()
+    errors = []
+
+    # 1. 检查系统内存
+    mem = psutil.virtual_memory()
+    if mem.available < 512 * 1024 * 1024:  # < 512MB
+        errors.append(f"insufficient_memory: available={mem.available/1024/1024:.0f}MB")
+    if mem.percent > 90:
+        errors.append(f"high_memory_usage: {mem.percent}%")
+
+    # 2. 检查 GPU 状态
+    if torch.cuda.is_available():
+        gpu_mem = torch.cuda.get_device_properties(0)
+        allocated = torch.cuda.memory_allocated(0) / 1024 / 1024
+        reserved = torch.cuda.memory_reserved(0) / 1024 / 1024
+        if allocated / gpu_mem.total_memory * 100 > 85:
+            errors.append(f"high_gpu_memory: {allocated:.0f}MB/{gpu_mem.total_memory/1024/1024:.0f}MB ({allocated/gpu_mem.total_memory*100:.0f}%)")
+
+    # 3. 检查模型加载状态
+    if not _model_loaded or _model_load_error:
+        errors.append(f"model_not_ready: {_model_load_error or 'unknown'}")
+
+    # 4. 推理测试 (30 秒内无成功请求时执行)
+    inference_result = None
+    do_inference_test = True
+
+    if _last_request_time > 0 and (current_time - _last_request_time) < AUDIO_TEST_COOLDOWN_SECONDS:
+        do_inference_test = False  # 30 秒内有成功请求，跳过推理测试
+
+    if do_inference_test:
+        inference_result, inf_error = _perform_inference_test()
+        if inf_error:
+            errors.append(f"inference_failed: {inf_error}")
+
+    if errors:
+        return {"status": "not_ready", "errors": errors, "model": model_dir}, 503
+
+    response = {
+        "status": "ready",
+        "model": model_dir,
+        "memory": {
+            "available_mb": round(mem.available / 1024 / 1024, 1),
+            "usage_percent": mem.percent,
+        },
+    }
+
+    # 如果进行了推理测试，添加推理结果信息
+    if inference_result:
+        response["inference_test"] = {
+            "performed": True,
+            "text_preview": inference_result["text"][:100] if inference_result["text"] else "",
+        }
+    else:
+        response["inference_test"] = {
+            "performed": False,
+            "reason": "recent_request",
+        }
+
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -66,6 +188,8 @@ async def turn_audio_to_text(
     lang: Annotated[Language, Form(description="language of audio content")] = "auto",
 ):
     result = await audio_to_text(files, lang)
+    global _last_request_time
+    _last_request_time = time.time()  # 更新最后请求时间
     return {"result": result}
 
 
@@ -159,6 +283,8 @@ async def siliconflow_transcribe(
         lang = "auto"
 
     result = await audio_to_text([file], lang)
+    global _last_request_time
+    _last_request_time = time.time()  # 更新最后请求时间
     return SiliconFlowResponse(text=result[0]["text"])
 
 
