@@ -8,11 +8,15 @@ import psutil
 import time
 import torch
 import logging
+import tempfile
+import threading
+import shutil
+from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing_extensions import Annotated
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Callable
 from enum import Enum
 import torchaudio
 from funasr import AutoModel
@@ -21,6 +25,77 @@ from io import BytesIO
 from dataclasses import dataclass
 
 TARGET_FS = 16000
+
+# 大文件流式处理配置
+LARGE_FILE_THRESHOLD_MB = float(os.getenv("LARGE_FILE_THRESHOLD_MB", "50"))  # 大文件阈值(MB)，默认50MB
+TEMP_FILE_CLEANUP_DELAY = int(os.getenv("TEMP_FILE_CLEANUP_DELAY", "300"))  # 临时文件清理延迟(秒)，默认5分钟
+TEMP_FILE_DIR = os.getenv("TEMP_FILE_DIR", "")  # 临时文件目录，为空时使用系统临时目录
+
+# 临时文件管理器
+class TempFileManager:
+    """管理临时音频文件的创建和延迟清理"""
+
+    def __init__(self, cleanup_delay: int = 300, temp_dir: str = None):
+        self.cleanup_delay = cleanup_delay
+        self.temp_dir = temp_dir if temp_dir else tempfile.gettempdir()
+        self.pending_files: dict = {}  # {file_path: (mtime, file_size)}
+        self.lock = threading.Lock()
+        self._cleanup_thread = None
+        self._running = False
+
+    def create_temp_file(self, suffix: str = ".wav") -> tuple[str, Callable]:
+        """创建临时文件，返回(文件路径, 清理函数)"""
+        import uuid
+        temp_file = os.path.join(self.temp_dir, f"sensevoice_{uuid.uuid4().hex}{suffix}")
+        file_size = 0
+
+        def cleanup():
+            """延迟清理临时文件"""
+            import time
+            time.sleep(self.cleanup_delay)
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    logger.info(f"Cleaned up temp file: {temp_file} ({file_size} bytes)")
+            except OSError as e:
+                logger.warning(f"Failed to clean up temp file {temp_file}: {e}")
+
+        # 记录待清理文件
+        with self.lock:
+            self.pending_files[temp_file] = None  # 仅记录路径
+
+        return temp_file, cleanup
+
+    def track_file_size(self, path: str, size: int):
+        """跟踪文件大小"""
+        with self.lock:
+            if path in self.pending_files:
+                self.pending_files[path] = size
+
+    def cleanup_immediately(self, path: str):
+        """立即清理临时文件"""
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"Immediately cleaned up temp file: {path}")
+        except OSError as e:
+            logger.warning(f"Failed to cleanup temp file {path}: {e}")
+        finally:
+            with self.lock:
+                self.pending_files.pop(path, None)
+
+    def cleanup_all(self):
+        """清理所有待清理的文件"""
+        with self.lock:
+            paths = list(self.pending_files.keys())
+        for path in paths:
+            self.cleanup_immediately(path)
+
+# 全局临时文件管理器实例
+temp_file_manager = TempFileManager(
+    cleanup_delay=TEMP_FILE_CLEANUP_DELAY,
+    temp_dir=TEMP_FILE_DIR if TEMP_FILE_DIR else None
+)
 
 # 配置日志
 logging.basicConfig(
@@ -324,13 +399,136 @@ async def turn_audio_to_text(
     return {"result": result}
 
 
-async def load_audio_input(file) -> BytesIO:
-    """加载音频文件支持三种传入方式: file上传/base64编码/URL"""
-    # 1. 直接文件上传 (UploadFile)
-    if hasattr(file, 'read'):
-        return BytesIO(await file.read())
+async def get_file_size_mb(file) -> float:
+    """获取上传文件或BytesIO的大小(MB)"""
+    # UploadFile 类型
+    if hasattr(file, 'size') and file.size:
+        return file.size / (1024 * 1024)
 
-    # 2. Base64 编码 (data:audio/xxx;base64,xxx 或纯 base64)
+    # BytesIO 类型
+    if hasattr(file, 'getbuffer'):
+        return file.getbuffer().nbytes / (1024 * 1024)
+
+    return 0.0
+
+
+async def load_audio_input_streaming(file, temp_path: str = None) -> tuple[str, str, float]:
+    """
+    流式加载大音频文件到临时文件
+
+    Args:
+        file: 上传的文件、base64编码或URL
+        temp_path: 临时文件路径（流式写入模式）
+    Returns:
+        tuple: (temp_path, 临时文件路径, 文件大小MB)
+    """
+    is_large_file = temp_path is not None
+
+    # 1. 直接文件上传 (UploadFile) - 流式写入临时文件
+    if hasattr(file, 'read'):
+        if is_large_file:
+            # 大文件：流式写入临时文件
+            with open(temp_path, 'wb') as f:
+                chunk_size = 8192  # 8KB chunks
+                while True:
+                    chunk = await file.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            # 记录文件大小
+            temp_file_manager.track_file_size(temp_path, os.path.getsize(temp_path))
+            return temp_path, temp_path, get_file_size_mb(file)
+        else:
+            # 小文件：直接读入内存
+            return BytesIO(await file.read()), None, get_file_size_mb(file)
+
+    # 2. Base64 编码 - 始终加载到内存（因为是编码后的数据）
+    if isinstance(file, str):
+        if file.startswith('data:'):
+            b64_data = file.split(',', 1)[1]
+            audio_bytes = base64.b64decode(b64_data)
+            size_mb = len(audio_bytes) / (1024 * 1024)
+
+            if is_large_file and size_mb > LARGE_FILE_THRESHOLD_MB:
+                # 大 base64 数据写入临时文件
+                with open(temp_path, 'wb') as f:
+                    f.write(audio_bytes)
+                temp_file_manager.track_file_size(temp_path, len(audio_bytes))
+                return temp_path, temp_path, size_mb
+
+            return BytesIO(audio_bytes), None, size_mb
+
+        if re.match(r'^[A-Za-z0-9+/=]+$', file) and len(file) > 100:
+            audio_bytes = base64.b64decode(file)
+            size_mb = len(audio_bytes) / (1024 * 1024)
+
+            if is_large_file and size_mb > LARGE_FILE_THRESHOLD_MB:
+                with open(temp_path, 'wb') as f:
+                    f.write(audio_bytes)
+                temp_file_manager.track_file_size(temp_path, len(audio_bytes))
+                return temp_path, temp_path, size_mb
+
+            return BytesIO(audio_bytes), None, size_mb
+
+        # 3. URL 方式 - 流式下载
+        if file.startswith('http://') or file.startswith('https://'):
+            async with httpx.AsyncClient() as client:
+                # 获取文件大小（如果支持）
+                head_resp = await client.head(file, timeout=30.0)
+                content_length = head_resp.headers.get('content-length')
+                size_mb = float(content_length) / (1024 * 1024) if content_length else 0.0
+
+                if is_large_file and size_mb > LARGE_FILE_THRESHOLD_MB:
+                    # 大文件流式下载到临时文件
+                    async with client.stream('GET', file, timeout=300.0) as response:
+                        response.raise_for_status()
+                        with open(temp_path, 'wb') as f:
+                            async for chunk in response.aiter_bytes(chunk_size=8192):
+                                f.write(chunk)
+                    temp_file_manager.track_file_size(temp_path, os.path.getsize(temp_path))
+                    return temp_path, temp_path, size_mb
+                else:
+                    # 小文件下载到内存
+                    resp = await client.get(file, timeout=300.0)
+                    resp.raise_for_status()
+                    return BytesIO(resp.content), None, size_mb
+
+    raise ValueError(f"无法识别的音频文件格式")
+
+
+def load_audio_with_torchaudio(source, sample_rate: int = None) -> tuple[torch.Tensor, int]:
+    """
+    从文件路径或BytesIO加载音频
+
+    Args:
+        source: 文件路径(str)或BytesIO对象
+        sample_rate: 目标采样率
+    Returns:
+        tuple: (音频tensor, 原始采样率)
+    """
+    waveform, audio_fs = torchaudio.load(source)
+
+    # 重采样至目标采样率
+    if sample_rate and audio_fs != sample_rate:
+        resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=sample_rate)
+        waveform = resampler(waveform)
+        audio_fs = sample_rate
+
+    # 转换为单声道
+    if waveform.dim() > 1 and waveform.shape[0] > 1:
+        waveform = waveform.mean(0, keepdim=True)
+
+    return waveform, audio_fs
+
+
+async def load_audio_input(file) -> BytesIO:
+    """加载音频文件到 BytesIO（同步/异步统一接口）"""
+    # 1. 直接文件上传 (UploadFile) - 需要异步读取
+    if hasattr(file, 'read'):
+        content = await file.read()
+        return BytesIO(content)
+
+    # 2. Base64 编码 (data:audio/xxx;base64,xxx 或纯 base64) - 同步处理
     if isinstance(file, str):
         if file.startswith('data:'):
             b64_data = file.split(',', 1)[1]
@@ -341,7 +539,7 @@ async def load_audio_input(file) -> BytesIO:
             audio_bytes = base64.b64decode(file)
             return BytesIO(audio_bytes)
 
-        # 3. URL 方式
+        # 3. URL 方式 - 异步下载
         if file.startswith('http://') or file.startswith('https://'):
             async with httpx.AsyncClient() as client:
                 response = await client.get(file, timeout=300.0)
@@ -352,27 +550,65 @@ async def load_audio_input(file) -> BytesIO:
 
 
 async def audio_to_text(files: list, lang: str = "auto", request: Request = None):
-    """通用音频转文字逻辑"""
+    """通用音频转文字逻辑，支持大文件流式处理"""
     endpoint = request.url.path if request else "unknown"
 
     try:
         audios = []
         audio_infos = []
+        temp_files_to_cleanup = []  # 记录需要清理的临时文件
+
         for f in files:
-            file_io = await load_audio_input(f)
-            data_or_path_or_list, audio_fs = torchaudio.load(file_io)
+            # 检测文件大小
+            file_size_mb = get_file_size_mb(f)
 
-            # 提取并记录音频元信息
-            audio_meta = extract_audio_metadata(f, file_io, audio_fs)
-            audio_infos.append(format_audio_metadata(audio_meta))
+            # 确定是否使用流式处理（大文件写入临时文件）
+            use_streaming = file_size_mb > LARGE_FILE_THRESHOLD_MB
 
-            # transform to target sample
-            if audio_fs != TARGET_FS:
-                resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
-                data_or_path_or_list = resampler(data_or_path_or_list)
+            if use_streaming:
+                logger.info(f"[{endpoint}] Large file detected ({file_size_mb:.2f}MB > {LARGE_FILE_THRESHOLD_MB}MB), using streaming mode")
+                temp_path, temp_file_manager_path, size_mb = await load_audio_input_streaming(f, temp_file_manager.create_temp_file()[0])
+                temp_files_to_cleanup.append(temp_path)
+            else:
+                temp_path = None
+                file_io = await load_audio_input(f)
+                size_mb = get_file_size_mb(f)
 
-            data_or_path_or_list = data_or_path_or_list.mean(0)
-            audios.append(data_or_path_or_list)
+            try:
+                # 加载音频
+                if temp_path:
+                    # 从临时文件加载
+                    waveform, audio_fs = load_audio_with_torchaudio(temp_path)
+                    # 清理临时文件（延迟清理）
+                    cleanup_path = temp_path
+                    if temp_file_manager_path:
+                        # 启动延迟清理线程
+                        _, cleanup_fn = temp_file_manager.create_temp_file()
+                        threading.Thread(target=cleanup_fn, daemon=True).start()
+                else:
+                    # 从内存加载
+                    waveform, audio_fs = load_audio_with_torchaudio(file_io)
+
+                # 提取并记录音频元信息
+                audio_meta = extract_audio_metadata(f, file_io if file_io else BytesIO(), audio_fs)
+                audio_infos.append(format_audio_metadata(audio_meta))
+
+                # 重采样至目标采样率
+                if audio_fs != TARGET_FS:
+                    resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
+                    waveform = resampler(waveform)
+                    audio_fs = TARGET_FS
+
+                waveform = waveform.mean(0)  # 转换为单声道
+                audios.append(waveform)
+
+            finally:
+                # 确保 BytesIO 被关闭
+                if file_io and hasattr(file_io, 'close'):
+                    try:
+                        file_io.close()
+                    except:
+                        pass
 
         # 记录音频信息
         if request is not None:
@@ -452,12 +688,9 @@ async def siliconflow_transcribe(
         logger.info(f"[{endpoint}] Audio metadata: {format_audio_metadata(audio_meta)}")
 
         result = await audio_to_text([file], lang, request)
-<<<<<<< HEAD
 
         global _last_request_time
         _last_request_time = time.time()  # 更新最后请求时间
-=======
->>>>>>> e5f969e (Let me verify `httpx` is properly imported:)
         return SiliconFlowResponse(text=result[0]["text"])
 
     except ValueError as ve:
