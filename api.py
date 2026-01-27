@@ -437,10 +437,10 @@ async def load_audio_input_streaming(file, temp_path: str = None) -> tuple[str, 
                     f.write(chunk)
             # 记录文件大小
             temp_file_manager.track_file_size(temp_path, os.path.getsize(temp_path))
-            return temp_path, temp_path, get_file_size_mb(file)
+            return temp_path, temp_path, await get_file_size_mb(file)
         else:
             # 小文件：直接读入内存
-            return BytesIO(await file.read()), None, get_file_size_mb(file)
+            return BytesIO(await file.read()), None, await get_file_size_mb(file)
 
     # 2. Base64 编码 - 始终加载到内存（因为是编码后的数据）
     if isinstance(file, str):
@@ -560,7 +560,7 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
 
         for f in files:
             # 检测文件大小
-            file_size_mb = get_file_size_mb(f)
+            file_size_mb = await get_file_size_mb(f)
 
             # 确定是否使用流式处理（大文件写入临时文件）
             use_streaming = file_size_mb > LARGE_FILE_THRESHOLD_MB
@@ -572,7 +572,7 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
             else:
                 temp_path = None
                 file_io = await load_audio_input(f)
-                size_mb = get_file_size_mb(f)
+                size_mb = await get_file_size_mb(f)
 
             try:
                 # 加载音频

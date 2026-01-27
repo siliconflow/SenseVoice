@@ -4,6 +4,18 @@
 
 ---
 
+## 20260127-302cf8d
+
+- **构建日期**: 2026-01-27T20:05:09+08:00
+- **Git 提交**: `302cf8d0c29ef5106e41c6aa0b81f05c083b7fda`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260127-302cf8d`
+- **镜像大小**: 6.08GB
+- **平台**: linux/amd64
+- **Bug 修复**:
+  - 修复 `get_file_size_mb()` 缺少 `await` 导致的 TypeError (P0 Bug)
+
+---
+
 ## 20260128-cf2f9bf
 
 - **构建日期**: 2026-01-28
