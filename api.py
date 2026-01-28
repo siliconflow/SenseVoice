@@ -318,11 +318,14 @@ async def ready():
 
     # 2. 检查 GPU 状态
     if torch.cuda.is_available():
-        gpu_mem = torch.cuda.get_device_properties(0)
-        allocated = torch.cuda.memory_allocated(0) / 1024 / 1024
-        reserved = torch.cuda.memory_reserved(0) / 1024 / 1024
-        if allocated / gpu_mem.total_memory * 100 > 85:
-            errors.append(f"high_gpu_memory: {allocated:.0f}MB/{gpu_mem.total_memory/1024/1024:.0f}MB ({allocated/gpu_mem.total_memory*100:.0f}%)")
+        try:
+            gpu_mem = torch.cuda.get_device_properties(0)
+            allocated = torch.cuda.memory_allocated(0) / 1024 / 1024
+            reserved = torch.cuda.memory_reserved(0) / 1024 / 1024
+            if allocated / gpu_mem.total_memory * 100 > 85:
+                errors.append(f"high_gpu_memory: {allocated:.0f}MB/{gpu_mem.total_memory/1024/1024:.0f}MB ({allocated/gpu_mem.total_memory*100:.0f}%)")
+        except Exception as e:
+            errors.append(f"gpu_check_failed: {str(e)}")
 
     # 3. 检查模型加载状态
     if not _model_loaded or _model_load_error:
@@ -549,8 +552,15 @@ async def load_audio_input(file) -> BytesIO:
     raise ValueError(f"无法识别的音频文件格式")
 
 
-async def audio_to_text(files: list, lang: str = "auto", request: Request = None):
-    """通用音频转文字逻辑，支持大文件流式处理"""
+async def audio_to_text(files: list, lang: str = "auto", request: Request = None, file_ios: list = None):
+    """通用音频转文字逻辑，支持大文件流式处理
+
+    Args:
+        files: 原始文件对象列表 (UploadFile, str路径, 或 base64/URL)
+        lang: 语言
+        request: 请求对象
+        file_ios: 已加载的 BytesIO 列表（可选，用于避免重复读取文件）
+    """
     endpoint = request.url.path if request else "unknown"
 
     try:
@@ -558,21 +568,29 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
         audio_infos = []
         temp_files_to_cleanup = []  # 记录需要清理的临时文件
 
-        for f in files:
-            # 检测文件大小
-            file_size_mb = await get_file_size_mb(f)
+        # 预处理：加载所有 BytesIO（如果传入）
+        ios_pool = file_ios or [None] * len(files)
+        file_io_iter = iter(ios_pool) if ios_pool else None
 
-            # 确定是否使用流式处理（大文件写入临时文件）
-            use_streaming = file_size_mb > LARGE_FILE_THRESHOLD_MB
+        for idx, f in enumerate(files):
+            # 从池中获取预加载的 BytesIO（如果有），否则动态加载
+            file_io = next(file_io_iter) if file_io_iter else None
+            temp_path = None
+            temp_file_manager_path = None
 
-            if use_streaming:
-                logger.info(f"[{endpoint}] Large file detected ({file_size_mb:.2f}MB > {LARGE_FILE_THRESHOLD_MB}MB), using streaming mode")
-                temp_path, temp_file_manager_path, size_mb = await load_audio_input_streaming(f, temp_file_manager.create_temp_file()[0])
-                temp_files_to_cleanup.append(temp_path)
-            else:
-                temp_path = None
-                file_io = await load_audio_input(f)
-                size_mb = await get_file_size_mb(f)
+            # 如果没有预加载的 BytesIO，则需要加载
+            if file_io is None:
+                # 检测文件大小
+                file_size_mb = await get_file_size_mb(f)
+                # 确定是否使用流式处理（大文件写入临时文件）
+                use_streaming = file_size_mb > LARGE_FILE_THRESHOLD_MB
+
+                if use_streaming:
+                    logger.info(f"[{endpoint}] Large file detected ({file_size_mb:.2f}MB > {LARGE_FILE_THRESHOLD_MB}MB), using streaming mode")
+                    temp_path, temp_file_manager_path, size_mb = await load_audio_input_streaming(f, temp_file_manager.create_temp_file()[0])
+                    temp_files_to_cleanup.append(temp_path)
+                else:
+                    file_io = await load_audio_input(f)
 
             try:
                 # 加载音频
@@ -603,8 +621,8 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
                 audios.append(waveform)
 
             finally:
-                # 确保 BytesIO 被关闭
-                if file_io and hasattr(file_io, 'close'):
+                # 确保 BytesIO 被关闭（临时文件不需要关闭）
+                if temp_path is None and file_io and hasattr(file_io, 'close'):
                     try:
                         file_io.close()
                     except:
@@ -617,6 +635,10 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
 
         if lang == "":
             lang = "auto"
+
+        # 检查模型是否已加载
+        if not _model_loaded:
+            raise RuntimeError("Model not loaded. Please check model initialization.")
 
         res = model.generate(
             input=audios,
@@ -685,9 +707,12 @@ async def siliconflow_transcribe(
         # 提取音频元信息
         file_io = await load_audio_input(file)
         audio_meta = extract_audio_metadata(file, file_io)
+        # 重置指针到开头，因为 extract_audio_metadata 内部调用 torchaudio.info 移动了指针
+        file_io.seek(0)
         logger.info(f"[{endpoint}] Audio metadata: {format_audio_metadata(audio_meta)}")
 
-        result = await audio_to_text([file], lang, request)
+        # 传入已加载的 file_io，避免重复读取导致文件指针失效
+        result = await audio_to_text([file], lang, request, file_ios=[file_io])
 
         global _last_request_time
         _last_request_time = time.time()  # 更新最后请求时间

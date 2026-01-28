@@ -4,15 +4,31 @@
 
 ---
 
-## 20260127-302cf8d
+## 20260128-8cc68fb
 
-- **构建日期**: 2026-01-27T20:05:09+08:00
-- **Git 提交**: `302cf8d0c29ef5106e41c6aa0b81f05c083b7fda`
-- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260127-302cf8d`
+- **构建日期**: 2026-01-28T11:52:08+08:00
+- **Git 提交**: `8cc68fb04a2062187b947baec10d3dd5baf3d57f`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260128-8cc68fb`
 - **镜像大小**: 6.08GB
 - **平台**: linux/amd64
 - **Bug 修复**:
-  - 修复 `get_file_size_mb()` 缺少 `await` 导致的 TypeError (P0 Bug)
+  - 修复 `siliconflow_transcribe` BytesIO 指针在 `extract_audio_metadata` 后未重置问题 (P0 Bug)
+
+---
+
+## 20260127-1f26442
+
+- **构建日期**: 2026-01-27T21:03:26+08:00
+- **Git 提交**: `1f26442ea1fa3565714084e53081f3bbc5ae14e6`
+- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260127-1f26442`
+- **镜像大小**: 6.08GB
+- **平台**: linux/amd64
+- **Bug 修复**:
+  - 修复 `siliconflow_transcribe` 重复读取文件导致 UploadFile 指针失效 (P0 Bug)
+  - 修复 `/ready` 端点 GPU 检查可能崩溃问题
+  - 修复 `audio_to_text` 缺少模型加载保护问题
+  - 修复 `webui.py` 变量 `model` 被覆盖问题
+  - 修复 `webui.py` `event_set` 末尾多余逗号
 
 ---
 
@@ -26,54 +42,6 @@
 - **平台**: linux/amd64
 - **Bug 修复**:
   - 添加缺失的 `psutil` 和 `httpx` 依赖到 requirements.txt
-
----
-
-## 20260127-cf2f9bf
-
-- **构建日期**: 2026-01-27
-- **Git 提交**: `cf2f9bfad1f68a1c389d33a0501b0a4e53431941`
-- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260127-cf2f9bf`
-- **镜像标签**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:latest`
-- **镜像大小**: 6.08GB
-- **平台**: linux/amd64
-- **变更内容**:
-  - 缓存文件清理：延迟清理临时音频文件，支持环境变量配置
-  - 请求信息记录：记录接口、trace id、音频元信息
-  - 健康检查：增加 `/health` 和 `/ready` 接口
-  - API 文档更新
-  - 标点控制：支持环境变量 `SENSEVOICE_USE_PUNC` 和 `SENSEVOICE_PUNC_MODEL`
-
----
-
-## 20260126-d2d4a64
-
-- **构建日期**: 2026-01-26T20:39:26+08:00
-- **Git 提交**: `d2d4a64d5da3f8f296d82e554a0d496ed24a7385`
-- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260126-d2d4a64`
-- **镜像大小**: unknown
-- **平台**: linux/amd64
-
----
-
-## 20260123-8eb7f1a
-
-- **构建日期**: 2026-01-23T19:10:32+08:00
-- **Git 提交**: `8eb7f1a358370a94836a5d4f6b7a34dc5df428de`
-- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-8eb7f1a`
-- **镜像大小**: unknown
-- **平台**: linux/amd64
-
----
-
-## 20260123-011181d
-
-- **构建日期**: 2026-01-23T20:00:00+08:00
-- **Git 提交**: `011181de0632efac34e95707e069e8eb2797b8ab`
-- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-011181d`
-- **镜像大小**: 6.08GB
-- **平台**: linux/amd64
-- **修复**: 修复 api.py/demo2.py/export.py 的 `from model import SenseVoiceSmall` 导入错误
 
 ---
 
@@ -103,18 +71,6 @@
 - **命名空间**: `clxuaivn500083i7ncuxpw8cf`
 - **镜像名称**: `sensevoice`
 - **完整地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:{tag}`
-
----
-
-## 构建版本记录
-
-### v0.0.1
-
-- **构建日期**: 2026-01-23
-- **Git 提交**: 0c0e606 (已完成镜像构建、推送 Skill 和记录系统的建立)
-- **镜像地址**: `hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260123-v0.0.1`
-- **平台**: linux/amd64
-- **优化**: 多阶段构建，Python 虚拟环境，非 root 用户
 
 ---
 

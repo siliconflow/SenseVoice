@@ -15,9 +15,9 @@ import torchaudio
 from funasr import AutoModel
 import os
 
-model = "iic/SenseVoiceSmall"
+model_name = "iic/SenseVoiceSmall"
 model_kwargs = {
-    "model": model,
+    "model": model_name,
     "vad_model": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
     "vad_kwargs": {"max_single_segment_time": 30000},
     "trust_remote_code": True,
@@ -95,7 +95,7 @@ lang_dict =  {
 }
 
 emo_set = {"😊", "😔", "😡", "😰", "🤢", "😮"}
-event_set = {"🎼", "👏", "😀", "😭", "🤧", "😷",}
+event_set = {"🎼", "👏", "😀", "😭", "🤧", "😷"}
 
 def format_str(s):
 	for sptk in emoji_dict:
