@@ -247,13 +247,13 @@ try:
 except Exception as e:
     _model_load_error = str(e)
     _model_loaded = False
+else:
+    _model_load_error = None
 
 regex = r"<\|.*\|>"
 
 app = FastAPI()
 
-
-_model_load_error = None
 _last_request_time = 0  # 上次成功请求的时间戳
 AUDIO_TEST_DIR = "test_audios"
 AUDIO_TEST_COOLDOWN_SECONDS = 30  # 30 秒内有成功请求则跳过推理测试
