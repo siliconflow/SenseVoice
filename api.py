@@ -243,12 +243,23 @@ try:
         model_kwargs["punc_model"] = _punc_model
 
     model = AutoModel(**model_kwargs)
+
+    # 启动时进行真正的推理测试，确保模型可加载
+    # 创建一个静音短音频进行测试
+    import torch
+    import torchaudio
+    test_waveform = torch.zeros(16000, dtype=torch.float32)  # 1秒静音
+    _ = model.generate(
+        input=test_waveform,
+        language="auto",
+        use_itn=False,
+        batch_size_s=60,
+    )
     _model_loaded = True
+    _model_load_error = None
 except Exception as e:
     _model_load_error = str(e)
     _model_loaded = False
-else:
-    _model_load_error = None
 
 regex = r"<\|.*\|>"
 
@@ -256,7 +267,7 @@ app = FastAPI()
 
 _last_request_time = 0  # 上次成功请求的时间戳
 AUDIO_TEST_DIR = "test_audios"
-AUDIO_TEST_COOLDOWN_SECONDS = 30  # 30 秒内有成功请求则跳过推理测试
+AUDIO_TEST_COOLDOWN_SECONDS = 3600  # 启动时已测试，跳过后续推理测试
 
 
 def _perform_inference_test():
