@@ -20,7 +20,7 @@ def ctc_forced_align(
             Lengths of the inputs (max value must each be <= `T`). 1-D Tensor of shape `(B,)`.
         target_lengths (Tensor):
             Lengths of the targets. 1-D Tensor of shape `(B,)`.
-        blank_id (int, optional): The index of blank symbol in CTC emission. (Default: 0)
+        blank (int, optional): The index of blank symbol in CTC emission. (Default: 0)
         ignore_id (int, optional): The index of ignore symbol in CTC emission. (Default: -1)
     """
     targets[targets == ignore_id] = blank

@@ -18,75 +18,25 @@ model_kwargs = {
     "device": os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
 }
 
-# 支持通过环境变量配置标点模型
-_use_punc = os.getenv("SENSEVOICE_USE_PUNC", "true").lower() == "true"
-if _use_punc:
-    model_kwargs["punc_model"] = os.getenv("SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch")
+# 支持通过环境变量手工指定标点模型（默认使用 ITN）
+_punc_model = os.getenv("SENSEVOICE_PUNC_MODEL", "")
+if _punc_model:
+    model_kwargs["punc_model"] = _punc_model
 
 model = AutoModel(**model_kwargs)
 
-# en
-res = model.generate(
-    input=f"{model.model_path}/example/en.mp3",
-    cache={},
-    language="auto",  # "zh", "en", "yue", "ja", "ko", "nospeech"
-    use_itn=True,
-    batch_size_s=60,
-    merge_vad=True,  #
-    merge_length_s=15,
-)
-text = rich_transcription_postprocess(res[0]["text"])
-print(text)
+# Process example audio files for different languages
+example_files = ["en.mp3", "zh.mp3", "yue.mp3", "ja.mp3", "ko.mp3"]
 
-# zh
-res = model.generate(
-    input=f"{model.model_path}/example/zh.mp3",
-    cache={},
-    language="auto",  # "zh", "en", "yue", "ja", "ko", "nospeech"
-    use_itn=True,
-    batch_size_s=60,
-    merge_vad=True,  #
-    merge_length_s=15,
-)
-text = rich_transcription_postprocess(res[0]["text"])
-print(text)
-
-# yue
-res = model.generate(
-    input=f"{model.model_path}/example/yue.mp3",
-    cache={},
-    language="auto",  # "zh", "en", "yue", "ja", "ko", "nospeech"
-    use_itn=True,
-    batch_size_s=60,
-    merge_vad=True,  #
-    merge_length_s=15,
-)
-text = rich_transcription_postprocess(res[0]["text"])
-print(text)
-
-# ja
-res = model.generate(
-    input=f"{model.model_path}/example/ja.mp3",
-    cache={},
-    language="auto",  # "zh", "en", "yue", "ja", "ko", "nospeech"
-    use_itn=True,
-    batch_size_s=60,
-    merge_vad=True,  #
-    merge_length_s=15,
-)
-text = rich_transcription_postprocess(res[0]["text"])
-print(text)
-
-
-# ko
-res = model.generate(
-    input=f"{model.model_path}/example/ko.mp3",
-    cache={},
-    language="auto",  # "zh", "en", "yue", "ja", "ko", "nospeech"
-    use_itn=True,
-    batch_size_s=60,
-    merge_vad=True,  #
-    merge_length_s=15,
-)
-text = rich_transcription_postprocess(res[0]["text"])
-print(text)
+for filename in example_files:
+    res = model.generate(
+        input=f"{model.model_path}/example/{filename}",
+        cache={},
+        language="auto",
+        use_itn=True,
+        batch_size_s=60,
+        merge_vad=True,
+        merge_length_s=15,
+    )
+    text = rich_transcription_postprocess(res[0]["text"])
+    print(f"[{filename}] {text}")

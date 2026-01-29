@@ -5,10 +5,8 @@ import os
 import sys
 import time
 import uuid
-import base64
 import asyncio
 import logging
-import tempfile
 import shutil
 import threading
 import traceback
@@ -22,7 +20,6 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTa
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel
 import uvicorn
-from starlette.responses import Response
 
 # Prometheus metrics
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
@@ -183,12 +180,10 @@ def load_model():
             "device": device,
         }
 
-        # 支持通过环境变量配置标点模型
-        use_punc = os.environ.get("SENSEVOICE_USE_PUNC", "true").lower() == "true"
-        if use_punc:
-            model_kwargs["punc_model"] = os.environ.get(
-                "SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch"
-            )
+        # 支持通过环境变量手工指定标点模型（默认使用 ITN）
+        punc_model = os.environ.get("SENSEVOICE_PUNC_MODEL", "")
+        if punc_model:
+            model_kwargs["punc_model"] = punc_model
 
         model = AutoModel(**model_kwargs)
 

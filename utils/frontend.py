@@ -8,8 +8,6 @@ import kaldi_native_fbank as knf
 
 root_dir = Path(__file__).resolve().parent
 
-logger_initialized = {}
-
 
 class WavFrontend:
     """Conventional frontend structure for ASR."""
@@ -406,28 +404,6 @@ class SinusoidalPositionEncoderOnline:
         return x + position_encoding[:, start_idx : start_idx + timesteps]
 
 
-def test():
-    path = "/nfs/zhifu.gzf/export/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/example/asr_example.wav"
-    import librosa
-
-    cmvn_file = "/nfs/zhifu.gzf/export/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/am.mvn"
-    config_file = "/nfs/zhifu.gzf/export/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/config.yaml"
-    from funasr.runtime.python.onnxruntime.rapid_paraformer.utils.utils import read_yaml
-
-    config = read_yaml(config_file)
-    waveform, _ = librosa.load(path, sr=None)
-    frontend = WavFrontend(
-        cmvn_file=cmvn_file,
-        **config["frontend_conf"],
-    )
-    speech, _ = frontend.fbank_online(waveform)  # 1d, (sample,), numpy
-    feat, feat_len = frontend.lfr_cmvn(
-        speech
-    )  # 2d, (frame, 450), np.float32 -> torch, torch.from_numpy(), dtype, (1, frame, 450)
-
-    frontend.reset_status()  # clear cache
-    return feat, feat_len
-
-
 if __name__ == "__main__":
-    test()
+    # Test function removed - contained hardcoded internal paths
+    pass

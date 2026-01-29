@@ -31,7 +31,7 @@ model_bin = SenseVoiceSmallONNX(model_path)
 try:
     from funasr.tokenizer.sentencepiece_tokenizer import SentencepiecesTokenizer
     tokenizer = SentencepiecesTokenizer(bpemodel=os.path.join(model_path, "chn_jpn_yue_eng_ko_spectok.bpe.model"))
-except:
+except Exception:
     tokenizer = None
 
 text = ["<|woitn|><|NEUTRAL|><|zh|>你好世界"]
@@ -39,6 +39,11 @@ print("src_text: {}".format(text))
 tokens = tokenizer.encode(text)
 print("token: {}".format(tokens))
 
-res = model_bin(wav_or_scp=tokenizer, language_list=[3], textnorm_list=[15])
-print("infer res: {}".format(res))
-print([rich_transcription_postprocess(i) for i in res])
+# Use example audio for testing
+test_wav = os.path.join(model_path, "example", "en.mp3")
+if os.path.exists(test_wav):
+    res = model_bin(wav_or_scp=test_wav, language_list=[3], textnorm_list=[15], tokenizer=tokenizer)
+    print("infer res: {}".format(res))
+    print([rich_transcription_postprocess(i) for i in res])
+else:
+    print("No example audio found for testing")

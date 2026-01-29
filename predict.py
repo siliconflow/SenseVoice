@@ -1,6 +1,8 @@
 # Cog预测入口文件 - 用于模型推理和在线API服务
 import os
 import sys
+import time
+import threading
 import torch
 import logging
 from typing import Optional
@@ -22,7 +24,7 @@ class Predictor(BasePredictor):
     """SenseVoice 预测器类（单例模式，模型全局共享）"""
 
     _model = None
-    _model_lock = None
+    _model_lock = threading.Lock()
 
     def setup(self):
         """加载模型（仅第一次调用时加载）"""
@@ -30,9 +32,7 @@ class Predictor(BasePredictor):
             logger.info("模型已存在，跳过重复加载")
             return
 
-        with Predictor._model_lock if Predictor._model_lock else (
-            Predictor.__dict__['_model_lock'] or setattr(Predictor, '_model_lock', __import__('threading').Lock())
-        ):
+        with Predictor._model_lock:
             # 双重检查
             if Predictor._model is not None:
                 return
@@ -74,7 +74,6 @@ class Predictor(BasePredictor):
         Returns:
             转写结果文本
         """
-        import time
         start_time = time.time()
 
         # 确保模型已加载
@@ -116,7 +115,7 @@ class Predictor(BasePredictor):
 
 # 全局模型实例（用于 API 服务复用）
 _transcribe_model = None
-_model_lock = __import__('threading').Lock()
+_model_lock = threading.Lock()
 
 
 def _get_model():
@@ -154,7 +153,6 @@ def transcribe_audio(
     Returns:
         包含转写结果的字典
     """
-    import time
     start_time = time.time()
 
     logger.info(f"API转写请求: {audio_path}")

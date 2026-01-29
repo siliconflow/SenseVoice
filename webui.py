@@ -1,19 +1,13 @@
 # coding=utf-8
 
 import os
-import librosa
-import base64
-import io
 import gradio as gr
 import re
-
 import numpy as np
 import torch
 import torchaudio
 
-
 from funasr import AutoModel
-import os
 
 model_name = "iic/SenseVoiceSmall"
 model_kwargs = {
@@ -23,14 +17,12 @@ model_kwargs = {
     "trust_remote_code": True,
 }
 
-# 支持通过环境变量配置标点模型
-_use_punc = os.getenv("SENSEVOICE_USE_PUNC", "true").lower() == "true"
-if _use_punc:
-    model_kwargs["punc_model"] = os.getenv("SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch")
+# 支持通过环境变量手工指定标点模型（默认使用 ITN）
+_punc_model = os.getenv("SENSEVOICE_PUNC_MODEL", "")
+if _punc_model:
+    model_kwargs["punc_model"] = _punc_model
 
 model = AutoModel(**model_kwargs)
-
-import re
 
 emo_dict = {
 	"<|HAPPY|>": "😊",
@@ -148,17 +140,12 @@ def format_str_v3(s):
 	return new_s.strip()
 
 def model_inference(input_wav, language, fs=16000):
-	# task_abbr = {"Speech Recognition": "ASR", "Rich Text Transcription": ("ASR", "AED", "SER")}
 	language_abbr = {"auto": "auto", "zh": "zh", "en": "en", "yue": "yue", "ja": "ja", "ko": "ko",
 					 "nospeech": "nospeech"}
-	
-	# task = "Speech Recognition" if task is None else task
+
 	language = "auto" if len(language) < 1 else language
 	selected_language = language_abbr[language]
-	# selected_task = task_abbr.get(task)
-	
-	# print(f"input_wav: {type(input_wav)}, {input_wav[1].shape}, {input_wav}")
-	
+
 	if isinstance(input_wav, tuple):
 		fs, input_wav = input_wav
 		input_wav = input_wav.astype(np.float32) / np.iinfo(np.int16).max
@@ -169,22 +156,21 @@ def model_inference(input_wav, language, fs=16000):
 			resampler = torchaudio.transforms.Resample(fs, 16000)
 			input_wav_t = torch.from_numpy(input_wav).to(torch.float32)
 			input_wav = resampler(input_wav_t[None, :])[0, :].numpy()
-	
-	
-	merge_vad = True #False if selected_task == "ASR" else True
+
+	merge_vad = True
 	print(f"language: {language}, merge_vad: {merge_vad}")
 	text = model.generate(input=input_wav,
 						  cache={},
 						  language=language,
 						  use_itn=True,
 						  batch_size_s=60, merge_vad=merge_vad)
-	
+
 	print(text)
 	text = text[0]["text"]
 	text = format_str_v3(text)
-	
+
 	print(text)
-	
+
 	return text
 
 
@@ -197,17 +183,11 @@ audio_examples = [
     ["example/emo_1.wav", "auto"],
     ["example/emo_2.wav", "auto"],
     ["example/emo_3.wav", "auto"],
-    #["example/emo_4.wav", "auto"],
-    #["example/event_1.wav", "auto"],
-    #["example/event_2.wav", "auto"],
-    #["example/event_3.wav", "auto"],
     ["example/rich_1.wav", "auto"],
     ["example/rich_2.wav", "auto"],
-    #["example/rich_3.wav", "auto"],
     ["example/longwav_1.wav", "auto"],
     ["example/longwav_2.wav", "auto"],
     ["example/longwav_3.wav", "auto"],
-    #["example/longwav_4.wav", "auto"],
 ]
 
 
@@ -228,12 +208,11 @@ html_content = """
 
 def launch():
 	with gr.Blocks(theme=gr.themes.Soft()) as demo:
-		# gr.Markdown(description)
 		gr.HTML(html_content)
 		with gr.Row():
 			with gr.Column():
 				audio_inputs = gr.Audio(label="Upload audio or use the microphone")
-				
+
 				with gr.Accordion("Configuration"):
 					language_inputs = gr.Dropdown(choices=["auto", "zh", "en", "yue", "ja", "ko", "nospeech"],
 												  value="auto",
@@ -248,7 +227,6 @@ def launch():
 
 
 if __name__ == "__main__":
-	# iface.launch()
 	launch()
 
 

@@ -4,6 +4,34 @@
 
 ---
 
+## 20260129-4e73b87
+
+- **构建日期**: 2026-01-29T18:22:52+08:00
+- **Git 提交**: `4e73b87fcbd6a6acbb811fc100695a15da8ea18e`
+- **镜像地址**: `[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260129-4e73b87
+[0;34m[INFO][0m 构建日期: 2026-01-29T18:22:47+08:00
+[0;34m[INFO][0m Git 提交: 4e73b87fcbd6a6acbb811fc100695a15da8ea18e
+[0;32m[SUCCESS][0m 镜像构建并推送成功: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260129-4e73b87
+hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260129-4e73b87`
+- **镜像大小**: unknown
+- **平台**: linux/amd64
+
+---
+
+## 20260129-df45952
+
+- **构建日期**: 2026-01-29T18:05:07+08:00
+- **Git 提交**: `df45952952a0a89cb1b0d967ddc5893b497b77e5`
+- **镜像地址**: `[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260129-df45952
+[0;34m[INFO][0m 构建日期: 2026-01-29T18:05:01+08:00
+[0;34m[INFO][0m Git 提交: df45952952a0a89cb1b0d967ddc5893b497b77e5
+[0;32m[SUCCESS][0m 镜像构建并推送成功: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260129-df45952
+hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260129-df45952`
+- **镜像大小**: unknown
+- **平台**: linux/amd64
+
+---
+
 ## 20260128-16cc717
 
 - **构建日期**: 2026-01-28T15:06:39+08:00

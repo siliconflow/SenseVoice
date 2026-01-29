@@ -44,11 +44,20 @@ model_bin = SenseVoiceSmallONNX(model_path)
 try:
     from funasr.tokenizer.sentencepiece_tokenizer import SentencepiecesTokenizer
     tokenizer = SentencepiecesTokenizer(bpemodel=os.path.join(model_path, "chn_jpn_yue_eng_ko_spectok.bpe.model"))
-except:
+except Exception:
     tokenizer = None
 
-# inference
-wav_or_scp = "/Users/shixian/Downloads/asr_example_hotword.wav"
+# inference - use example audio from model directory
+import sys
+wav_or_scp = os.path.join(model_path, "example", "en.mp3")
+if not os.path.exists(wav_or_scp):
+    print(f"Example audio not found at {wav_or_scp}")
+    print("Please provide an audio file path as argument")
+    if len(sys.argv) > 1:
+        wav_or_scp = sys.argv[1]
+    else:
+        sys.exit(1)
+
 language_list = [0]
 textnorm_list = [15]
 res = model_bin(wav_or_scp, language_list, textnorm_list, tokenizer=tokenizer)

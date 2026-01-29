@@ -10,7 +10,6 @@ import torch
 import logging
 import tempfile
 import threading
-import shutil
 from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import HTMLResponse
@@ -30,6 +29,10 @@ TARGET_FS = 16000
 LARGE_FILE_THRESHOLD_MB = float(os.getenv("LARGE_FILE_THRESHOLD_MB", "50"))  # 大文件阈值(MB)，默认50MB
 TEMP_FILE_CLEANUP_DELAY = int(os.getenv("TEMP_FILE_CLEANUP_DELAY", "300"))  # 临时文件清理延迟(秒)，默认5分钟
 TEMP_FILE_DIR = os.getenv("TEMP_FILE_DIR", "")  # 临时文件目录，为空时使用系统临时目录
+
+# 性能优化配置
+ENABLE_MODEL_WARMUP = os.getenv("ENABLE_MODEL_WARMUP", "false").lower() == "true"  # 默认不开启模型预热
+ENABLE_INFERENCE_LOCK = os.getenv("ENABLE_INFERENCE_LOCK", "false").lower() == "true"  # 默认不开启推理锁
 
 # 临时文件管理器
 class TempFileManager:
@@ -97,12 +100,15 @@ temp_file_manager = TempFileManager(
     temp_dir=TEMP_FILE_DIR if TEMP_FILE_DIR else None
 )
 
-# 配置日志
+# 配置日志 - 使用强制配置确保不被其他库覆盖
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True  # Python 3.8+ 支持，强制重新配置
 )
 logger = logging.getLogger(__name__)
+# 确保 logger 级别正确设置
+logger.setLevel(logging.INFO)
 
 
 @dataclass
@@ -224,9 +230,8 @@ class Language(str, Enum):
 
 model_dir = "iic/SenseVoiceSmall"
 
-# 标点模型配置
-_use_punc = os.getenv("SENSEVOICE_USE_PUNC", "true").lower() == "true"
-_punc_model = os.getenv("SENSEVOICE_PUNC_MODEL", "iic/speech_punc_zh-cn-common-vocab2724-pytorch")
+# 标点模型配置 - 仅当手工指定时才加载
+_punc_model = os.getenv("SENSEVOICE_PUNC_MODEL", "")
 
 try:
     model_kwargs = {
@@ -238,23 +243,54 @@ try:
         "device": os.getenv("SENSEVOICE_DEVICE", "cuda:0"),
     }
 
-    # 仅在启用标点功能时加载标点模型
-    if _use_punc:
+    # 仅当手工指定标点模型时才加载
+    if _punc_model:
         model_kwargs["punc_model"] = _punc_model
 
     model = AutoModel(**model_kwargs)
 
     # 启动时进行真正的推理测试，确保模型可加载
-    # 创建一个静音短音频进行测试
     import torch
     import torchaudio
     test_waveform = torch.zeros(16000, dtype=torch.float32)  # 1秒静音
     _ = model.generate(
         input=test_waveform,
         language="auto",
-        use_itn=False,
+        use_itn=True,
         batch_size_s=60,
     )
+
+    # 可选：模型预热（通过环境变量开启）
+    if ENABLE_MODEL_WARMUP:
+        logger.info("开始模型预热...")
+        warmup_start = time.time()
+
+        # 预热 1: 基础推理
+        _ = model.generate(
+            input=test_waveform,
+            language="auto",
+            use_itn=True,
+            batch_size_s=60,
+        )
+
+        # 预热 2: 再次推理确保 CUDA 上下文完全初始化
+        _ = model.generate(
+            input=test_waveform,
+            language="auto",
+            use_itn=True,
+            batch_size_s=60,
+        )
+
+        warmup_duration = time.time() - warmup_start
+        logger.info(f"模型预热完成，耗时: {warmup_duration:.3f}s")
+
+        # 设置 CUDA 为性能模式（如果可用）
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.backends.cudnn.benchmark = True  # 启用 cudnn 自动优化
+            logger.info(f"CUDA 设备: {torch.cuda.get_device_name(0)}")
+            logger.info(f"CUDA 内存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+
     _model_loaded = True
     _model_load_error = None
 except Exception as e:
@@ -268,6 +304,9 @@ app = FastAPI()
 _last_request_time = 0  # 上次成功请求的时间戳
 AUDIO_TEST_DIR = "test_audios"
 AUDIO_TEST_COOLDOWN_SECONDS = 3600  # 启动时已测试，跳过后续推理测试
+
+# 可选：模型推理锁，防止并发请求导致 GPU 资源竞争（通过环境变量开启）
+_model_inference_lock = threading.Lock() if ENABLE_INFERENCE_LOCK else None
 
 
 def _perform_inference_test():
@@ -298,7 +337,7 @@ def _perform_inference_test():
         res = model.generate(
             input=[waveform],
             language="auto",
-            use_itn=False,
+            use_itn=True,
             batch_size_s=60,
         )
 
@@ -572,7 +611,9 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
         request: 请求对象
         file_ios: 已加载的 BytesIO 列表（可选，用于避免重复读取文件）
     """
+    import time
     endpoint = request.url.path if request else "unknown"
+    process_start = time.time()
 
     try:
         audios = []
@@ -636,7 +677,7 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
                 if temp_path is None and file_io and hasattr(file_io, 'close'):
                     try:
                         file_io.close()
-                    except:
+                    except Exception:
                         pass
 
         # 记录音频信息
@@ -651,12 +692,30 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
         if not _model_loaded:
             raise RuntimeError("Model not loaded. Please check model initialization.")
 
-        res = model.generate(
-            input=audios,
-            language=lang,
-            use_itn=False,
-            batch_size_s=60,
-        )
+        # 可选：使用锁序列化模型推理（通过环境变量 ENABLE_INFERENCE_LOCK 开启）
+        inference_start = time.time()
+        if _model_inference_lock:
+            with _model_inference_lock:
+                lock_wait_duration = time.time() - inference_start
+                if lock_wait_duration > 0.1:  # 如果等待锁超过100ms，记录日志
+                    logger.info(f"[{endpoint}] Waited {lock_wait_duration:.3f}s for model lock")
+
+                res = model.generate(
+                    input=audios,
+                    language=lang,
+                    use_itn=True,
+                    batch_size_s=60,
+                )
+        else:
+            res = model.generate(
+                input=audios,
+                language=lang,
+                use_itn=True,
+                batch_size_s=60,
+            )
+        inference_duration = time.time() - inference_start
+        logger.info(f"[{endpoint}] Model inference completed in {inference_duration:.3f}s")
+
         result = []
         for r in res:
             text = r["text"]
@@ -665,6 +724,9 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
                 "clean_text": re.sub(regex, "", text, 0, re.MULTILINE),
                 "text": rich_transcription_postprocess(text),
             })
+
+        total_duration = time.time() - process_start
+        logger.info(f"[{endpoint}] audio_to_text total time: {total_duration:.3f}s (inference: {inference_duration:.3f}s)")
         return result
 
     except Exception as e:
@@ -695,6 +757,9 @@ async def siliconflow_transcribe(
     - 自动重采样至 16kHz
     - 返回可读文本（含标点）
     """
+    import time
+    request_start_time = time.time()
+
     # 获取请求路径
     endpoint = request.url.path
     client_host = request.client.host if request.client else "unknown"
@@ -727,6 +792,10 @@ async def siliconflow_transcribe(
 
         global _last_request_time
         _last_request_time = time.time()  # 更新最后请求时间
+
+        request_duration = time.time() - request_start_time
+        logger.info(f"[{endpoint}] Request completed in {request_duration:.3f}s")
+
         return SiliconFlowResponse(text=result[0]["text"])
 
     except ValueError as ve:
