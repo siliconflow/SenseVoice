@@ -9,6 +9,8 @@ import asyncio
 import logging
 import shutil
 import threading
+import signal
+import base64
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -113,6 +115,10 @@ model = None
 model_load_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=30)  # 支持30并发
 request_counter_lock = threading.Lock()
+
+# K8s 优雅退出支持
+_shutdown_event = threading.Event()
+_shutdown_timeout = int(os.getenv("SHUTDOWN_TIMEOUT", "30"))  # 优雅退出等待超时(秒)
 
 
 def get_model_name():
@@ -480,6 +486,23 @@ async def process_audio(
         raise
 
 
+def _signal_handler(signum, frame):
+    """处理 SIGTERM/SIGINT 信号，设置优雅退出标志"""
+    signal_name = signal.Signals(signum).name
+    logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+    _shutdown_event.set()
+
+
+# 注册信号处理器 (仅在主线程中)
+try:
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    logger.info("Signal handlers registered for graceful shutdown")
+except ValueError:
+    # 非主线程时不注册信号处理器
+    pass
+
+
 # ============== FastAPI 应用 ==============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -496,6 +519,9 @@ async def lifespan(app: FastAPI):
     yield
     # 关闭时清理
     logger.info("SenseVoice API 服务关闭")
+    # 关闭线程池
+    _executor.shutdown(wait=True)
+    logger.info("ThreadPoolExecutor shutdown complete")
 
 
 app = FastAPI(
@@ -766,14 +792,18 @@ def main():
     if args.workers > 1:
         logger.warning("警告: workers > 1 时每个进程会独立加载模型，可能导致显存溢出")
 
-    uvicorn.run(
+    config = uvicorn.Config(
         "openai_api:app",
         host=args.host,
         port=args.port,
         workers=args.workers,
         log_level="info",
         log_config=None,  # 使用自定义日志配置
+        timeout_graceful_shutdown=_shutdown_timeout,
     )
+    server = uvicorn.Server(config)
+    logger.info(f"Starting server on {args.host}:{args.port}, shutdown_timeout={_shutdown_timeout}s")
+    server.run()
 
 
 if __name__ == "__main__":

@@ -896,7 +896,41 @@ async def siliconflow_transcribe(
         raise
 
 
+# K8s 优雅退出支持
+_shutdown_event = threading.Event()
+_shutdown_timeout = int(os.getenv("SHUTDOWN_TIMEOUT", "30"))  # 优雅退出等待超时(秒)
+
+
+def _signal_handler(signum, frame):
+    """处理 SIGTERM/SIGINT 信号，设置优雅退出标志"""
+    signal_name = signal.Signals(signum).name
+    logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+    _shutdown_event.set()
+
+
+# 注册信号处理器 (仅在主线程中)
+try:
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    logger.info("Signal handlers registered for graceful shutdown")
+except ValueError:
+    # 非主线程时不注册信号处理器
+    pass
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=50000)
+    # 检查是否有通过环境变量设置端口
+    port = int(os.getenv("PORT", "50000"))
+    host = os.getenv("HOST", "0.0.0.0")
+
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        timeout_graceful_shutdown=_shutdown_timeout,
+    )
+    server = uvicorn.Server(config)
+    logger.info(f"Starting server on {host}:{port}, shutdown_timeout={_shutdown_timeout}s")
+    server.run()
