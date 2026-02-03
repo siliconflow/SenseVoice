@@ -66,7 +66,8 @@ ENV PYTHONUNBUFFERED=1 \
     LOG_DIR=/app/logs \
     MODELSCOPE_CACHE=/models \
     HF_HOME=/tmp/.cache \
-    SENSEVOICE_DEVICE="cuda"
+    SENSEVOICE_DEVICE="cuda" \
+    GRACEFUL_SHUTDOWN_TIMEOUT="30"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \

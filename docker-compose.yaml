@@ -22,6 +22,10 @@ services:
       # 日志目录
       LOG_DIR: /app/logs
 
+      # ========== 优雅退出配置 ==========
+      # K8s 优雅退出超时时间（秒）
+      GRACEFUL_SHUTDOWN_TIMEOUT: "30"
+
       # ========== 模型预加载策略 ==========
       # PRELOAD_MODEL: 是否预加载模型到内存 (1=是，0=否，首次请求时加载)
       # 首次部署建议设为 1，容器启动时会下载模型并加载到内存
@@ -56,6 +60,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    # K8s 优雅退出配置
+    stop_grace_period: 35s  # 比 GRACEFUL_SHUTDOWN_TIMEOUT 稍长
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s

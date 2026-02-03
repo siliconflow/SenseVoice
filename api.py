@@ -2,6 +2,8 @@
 # export SENSEVOICE_DEVICE=cuda:1
 
 import os, re
+import sys
+import signal
 import base64
 import httpx
 import psutil
@@ -10,9 +12,11 @@ import torch
 import logging
 import tempfile
 import threading
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing_extensions import Annotated
 from typing import List, Optional, Union, Callable
@@ -33,6 +37,12 @@ TEMP_FILE_DIR = os.getenv("TEMP_FILE_DIR", "")  # 临时文件目录，为空时
 # 性能优化配置
 ENABLE_MODEL_WARMUP = os.getenv("ENABLE_MODEL_WARMUP", "false").lower() == "true"  # 默认不开启模型预热
 ENABLE_INFERENCE_LOCK = os.getenv("ENABLE_INFERENCE_LOCK", "false").lower() == "true"  # 默认不开启推理锁
+
+# K8s 优雅退出配置
+GRACEFUL_SHUTDOWN_TIMEOUT = int(os.getenv("GRACEFUL_SHUTDOWN_TIMEOUT", "30"))  # 优雅退出超时（秒）
+_is_shutting_down = False
+_active_requests = 0
+_shutdown_event = asyncio.Event()
 
 # 临时文件管理器
 class TempFileManager:
@@ -299,14 +309,91 @@ except Exception as e:
 
 regex = r"<\|.*\|>"
 
-app = FastAPI()
-
 _last_request_time = 0  # 上次成功请求的时间戳
 AUDIO_TEST_DIR = "test_audios"
 AUDIO_TEST_COOLDOWN_SECONDS = 3600  # 启动时已测试，跳过后续推理测试
 
 # 可选：模型推理锁，防止并发请求导致 GPU 资源竞争（通过环境变量开启）
 _model_inference_lock = threading.Lock() if ENABLE_INFERENCE_LOCK else None
+
+
+def handle_sigterm(signum, frame):
+    """处理 SIGTERM 信号（K8s 发送）- 优雅退出"""
+    global _is_shutting_down
+    logger.info(f"Received SIGTERM, starting graceful shutdown...")
+    _is_shutting_down = True
+
+    # 创建异步任务等待请求完成
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(wait_for_requests_complete())
+        else:
+            asyncio.run(wait_for_requests_complete())
+    except Exception as e:
+        logger.error(f"Error during graceful shutdown: {e}")
+        sys.exit(1)
+
+
+async def wait_for_requests_complete():
+    """等待所有活跃请求完成"""
+    global _active_requests
+
+    logger.info(f"Waiting for {_active_requests} active requests to complete...")
+
+    # 等待最多 GRACEFUL_SHUTDOWN_TIMEOUT 秒
+    waited = 0
+    while _active_requests > 0 and waited < GRACEFUL_SHUTDOWN_TIMEOUT:
+        await asyncio.sleep(1)
+        waited += 1
+        if waited % 5 == 0:  # 每 5 秒记录一次
+            logger.info(f"Still waiting for {_active_requests} active requests... ({waited}s)")
+
+    if _active_requests > 0:
+        logger.warning(f"Graceful shutdown timeout. {_active_requests} requests remaining.")
+    else:
+        logger.info("Graceful shutdown complete. All requests finished.")
+
+    _shutdown_event.set()
+    sys.exit(0)
+
+
+# 注册信号处理器
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    logger.info("Service starting...")
+    yield
+    logger.info("Service shutting down...")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def graceful_shutdown_middleware(request: Request, call_next):
+    """中间件：处理优雅关闭期间的请求"""
+    global _active_requests, _is_shutting_down
+
+    # 如果正在关闭，拒绝新请求
+    if _is_shutting_down:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Service is shutting down", "status": "unavailable"}
+        )
+
+    # 增加活跃请求计数
+    _active_requests += 1
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        # 减少活跃请求计数
+        _active_requests -= 1
 
 
 def _perform_inference_test():
