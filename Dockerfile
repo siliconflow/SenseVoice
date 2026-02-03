@@ -1,9 +1,18 @@
 # ==================== SenseVoice API Server ====================
 # Optimized Dockerfile - Multi-stage build for smaller image
 # Build target: linux/amd64
+# Supports: RTX 4090 (Ada) and RTX 5090 (Blackwell)
+#
+# Build args:
+#   TORCH_VERSION: PyTorch version to install (default: 2.5.1 for RTX 4090, 2.6.0 for RTX 5090)
+#   TORCH_INDEX_URL: PyTorch index URL (default: cu124 for RTX 4090, cu128 for RTX 5090)
 
 # ==================== Stage 1: Build dependencies ====================
 FROM mirror.gcr.io/library/python:3.10-slim-bookworm AS builder
+
+# Build arguments for PyTorch version selection
+ARG TORCH_VERSION=2.5.1
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
 
 # Use Aliyun mirror for apt
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
@@ -20,11 +29,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install dependencies with Aliyun pip mirror
-COPY requirements.txt .
+# Install PyTorch with specific version and CUDA support
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir torch==${TORCH_VERSION} torchaudio --index-url ${TORCH_INDEX_URL}
+
+# Install other dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ==================== Stage 2: Runtime image ====================
 FROM mirror.gcr.io/library/python:3.10-slim-bookworm AS runtime

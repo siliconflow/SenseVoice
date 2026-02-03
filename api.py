@@ -243,7 +243,72 @@ model_dir = "iic/SenseVoiceSmall"
 # 标点模型配置 - 仅当手工指定时才加载
 _punc_model = os.getenv("SENSEVOICE_PUNC_MODEL", "")
 
+# GPU 兼容性检测函数
+def _check_gpu_compatibility():
+    """检查 GPU 兼容性，返回 (是否兼容, 警告信息列表)"""
+    warnings = []
+
+    if not torch.cuda.is_available():
+        return True, warnings  # CPU 模式，无需检查
+
+    try:
+        device_name = torch.cuda.get_device_name(0)
+        capability = torch.cuda.get_device_capability(0)
+        cuda_version = torch.version.cuda
+        pytorch_version = torch.__version__
+
+        logger.info(f"GPU: {device_name}")
+        logger.info(f"Compute Capability: {capability}")
+        logger.info(f"CUDA Version: {cuda_version}")
+        logger.info(f"PyTorch Version: {pytorch_version}")
+
+        # 解析 PyTorch 版本 (处理 "2.3.0+cu121" 格式)
+        try:
+            version_parts = pytorch_version.split('+')[0].split('.')
+            pytorch_major = int(version_parts[0])
+            pytorch_minor = int(version_parts[1])
+        except (ValueError, IndexError):
+            logger.warning(f"无法解析 PyTorch 版本: {pytorch_version}，跳过版本检查")
+            pytorch_major, pytorch_minor = 2, 3  # 假设兼容
+
+        # Blackwell 架构 (RTX 50xx) 检测 - Compute Capability 10.0+
+        if capability[0] >= 10:
+            warnings.append(f"检测到 Blackwell 架构 GPU ({device_name})")
+            warnings.append(f"Compute Capability: {capability[0]}.{capability[1]}")
+
+            # 检查 PyTorch 版本 (RTX 5090 需要 PyTorch 2.7.0+，因为 2.6.0 在 cu128 中不可用)
+            if pytorch_major < 2 or (pytorch_major == 2 and pytorch_minor < 7):
+                warnings.append(f"ERROR: RTX 5090 需要 PyTorch >= 2.7.0，当前版本: {pytorch_version}")
+                warnings.append("请升级 PyTorch: pip install torch>=2.7.0 torchaudio --index-url https://download.pytorch.org/whl/cu128")
+                return False, warnings
+
+            # 检查 CUDA 版本 (处理 "12.8" 或 "12.8.0" 格式)
+            if cuda_version:
+                try:
+                    cuda_major_minor = float('.'.join(cuda_version.split('.')[:2]))
+                    if cuda_major_minor < 12.8:
+                        warnings.append(f"ERROR: RTX 5090 需要 CUDA >= 12.8，当前版本: {cuda_version}")
+                        return False, warnings
+                except ValueError:
+                    logger.warning(f"无法解析 CUDA 版本: {cuda_version}，跳过版本检查")
+
+        # Hopper/Ada/Ampere/Turing 等架构 (正常支持)
+        else:
+            logger.info(f"GPU 架构正常支持 (Compute Capability {capability[0]}.{capability[1]})")
+
+    except Exception as e:
+        logger.warning(f"GPU 兼容性检查失败: {e}")
+
+    return True, warnings
+
 try:
+    # 首先检查 GPU 兼容性
+    _gpu_compatible, _gpu_warnings = _check_gpu_compatibility()
+    if not _gpu_compatible:
+        for warning in _gpu_warnings:
+            logger.error(warning)
+        raise RuntimeError(f"GPU 不兼容: {'; '.join(_gpu_warnings)}")
+
     model_kwargs = {
         "model": model_dir,
         "trust_remote_code": True,
@@ -306,6 +371,7 @@ try:
 except Exception as e:
     _model_load_error = str(e)
     _model_loaded = False
+    logger.error(f"模型加载失败: {e}")
 
 regex = r"<\|.*\|>"
 

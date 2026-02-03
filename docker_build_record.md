@@ -4,6 +4,38 @@
 
 ---
 
+## 20260203-ac413e9
+
+- **构建日期**: 2026-02-03T16:11:23+08:00
+- **Git 提交**: `ac413e9732cc48900f9b531047f4eca476a35648`
+- **镜像地址**: `[0;34m[INFO][0m 构建 RTX 5090 (Blackwell) 版本
+[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260203-ac413e9-rtx5090
+[0;34m[INFO][0m PyTorch 版本: 2.7.0
+[0;34m[INFO][0m CUDA 版本: https://download.pytorch.org/whl/cu128
+[0;34m[INFO][0m 构建日期: 2026-02-03T15:28:58+08:00
+[0;34m[INFO][0m Git 提交: ac413e9732cc48900f9b531047f4eca476a35648
+[0;31m[ERROR][0m 镜像构建失败`
+- **镜像大小**: unknown
+- **平台**: linux/amd64
+
+---
+
+## 20260203-b34ae96
+
+- **构建日期**: 2026-02-03T10:58:14+08:00
+- **Git 提交**: `b34ae969ad7a3a2af87a00b12b446b793350ef3f`
+- **镜像地址**: `[0;34m[INFO][0m 构建 RTX 5090 (Blackwell) 版本
+[0;34m[INFO][0m 开始构建镜像: hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:20260203-b34ae96-rtx5090
+[0;34m[INFO][0m PyTorch 版本: 2.6.0
+[0;34m[INFO][0m CUDA 版本: https://download.pytorch.org/whl/cu128
+[0;34m[INFO][0m 构建日期: 2026-02-03T10:57:21+08:00
+[0;34m[INFO][0m Git 提交: b34ae969ad7a3a2af87a00b12b446b793350ef3f
+[0;31m[ERROR][0m 镜像构建失败`
+- **镜像大小**: unknown
+- **平台**: linux/amd64
+
+---
+
 ## 20260129-4e73b87
 
 - **构建日期**: 2026-01-29T18:22:52+08:00

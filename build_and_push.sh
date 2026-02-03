@@ -57,11 +57,30 @@ setup_builder() {
 # 构建镜像
 build_image() {
     local version_tag=$1
+    local target_arch=${2:-"rtx4090"}  # 默认构建 RTX 4090 版本
     local full_image="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${version_tag}"
     local build_date=$(date -Iseconds)
     local git_commit=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
 
+    # 根据目标架构选择 PyTorch 版本
+    # PyTorch 版本说明:
+    # - CUDA 12.4 (RTX 4090): PyTorch 2.5.1+cu124
+    # - CUDA 12.8 (RTX 5090): PyTorch 2.7.0+cu128 (2.6.0 在 cu128 中不可用，使用 2.7.0)
+    local torch_version="2.5.1"
+    local torch_index_url="https://download.pytorch.org/whl/cu124"
+
+    if [ "${target_arch}" = "rtx5090" ]; then
+        torch_version="2.7.0"
+        torch_index_url="https://download.pytorch.org/whl/cu128"
+        full_image="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${version_tag}-rtx5090"
+        log_info "构建 RTX 5090 (Blackwell) 版本"
+    else
+        log_info "构建 RTX 4090 (Ada) 版本"
+    fi
+
     log_info "开始构建镜像: ${full_image}"
+    log_info "PyTorch 版本: ${torch_version}"
+    log_info "CUDA 版本: ${torch_index_url}"
     log_info "构建日期: ${build_date}"
     log_info "Git 提交: ${git_commit}"
 
@@ -73,6 +92,8 @@ build_image() {
         --build-arg BUILD_DATE="${build_date}" \
         --build-arg VCS_REF="${git_commit}" \
         --build-arg VERSION="${version_tag}" \
+        --build-arg TORCH_VERSION="${torch_version}" \
+        --build-arg TORCH_INDEX_URL="${torch_index_url}" \
         . || {
             log_error "镜像构建失败"
             return 1
@@ -136,16 +157,19 @@ show_help() {
     echo "Usage: $0 [OPTIONS] [VERSION_TAG]
 
 Options:
-    -h, --help     显示帮助信息
-    -v, --version  显示版本号
-    --no-login     跳过登录直接构建
+    -h, --help       显示帮助信息
+    -v, --version    显示版本号
+    --no-login       跳过登录直接构建
+    --rtx5090        构建 RTX 5090 (Blackwell) 版本
 
 Arguments:
-    VERSION_TAG    版本标签 (默认: 自动生成，如 20250123-v1.0.0)
+    VERSION_TAG      版本标签 (默认: 自动生成，如 20250123-v1.0.0)
 
 Examples:
-    $0                     # 自动生成版本标签
-    $0 v1.0.0              # 使用指定标签
+    $0                     # 自动生成版本标签 (RTX 4090 版本)
+    $0 v1.0.0              # 使用指定标签 (RTX 4090 版本)
+    $0 --rtx5090           # 构建 RTX 5090 版本
+    $0 --rtx5090 v1.0.0    # 构建指定版本的 RTX 5090 版本
     $0 --no-login          # 跳过登录
 "
 }
@@ -154,6 +178,7 @@ Examples:
 main() {
     local version_tag=""
     local skip_login=false
+    local target_arch="rtx4090"  # 默认构建 RTX 4090 版本
 
     # 解析参数
     while [[ $# -gt 0 ]]; do
@@ -168,6 +193,10 @@ main() {
                 ;;
             --no-login)
                 skip_login=true
+                shift
+                ;;
+            --rtx5090)
+                target_arch="rtx5090"
                 shift
                 ;;
             -*)
@@ -207,7 +236,7 @@ main() {
     fi
 
     # 构建并推送
-    local full_image=$(build_image "${version_tag}")
+    local full_image=$(build_image "${version_tag}" "${target_arch}")
     if [ $? -eq 0 ]; then
         record_build "${version_tag}" "${full_image}"
         echo ""
