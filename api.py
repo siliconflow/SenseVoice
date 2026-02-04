@@ -891,11 +891,18 @@ class SiliconFlowResponse(BaseModel):
     text: str
 
 
+class TranscriptionRequest(BaseModel):
+    """JSON body 请求格式，用于 base64 或 URL 提交"""
+    file: str  # base64 编码或 URL
+    model: str = "FunAudioLLM/SenseVoiceSmall"
+    language: Optional[str] = None
+
+
 @app.post("/v1/audio/transcriptions", response_model=SiliconFlowResponse)
 @app.post("/audio/transcriptions", response_model=SiliconFlowResponse)
 async def siliconflow_transcribe(
     request: Request,
-    file: Union[UploadFile, str] = File(..., description="Audio file: file upload, base64 encode, or URL"),
+    file: Union[UploadFile, str] = File(None, description="Audio file: file upload, base64 encode, or URL"),
     model: str = Form(default="FunAudioLLM/SenseVoiceSmall", description="Model name"),
     language: str = Form(default=None, description="Language (auto, zh, en, yue, ja, ko)"),
 ):
@@ -928,20 +935,37 @@ async def siliconflow_transcribe(
         }
         logger.info(f"[{endpoint}] Trace-Ids: {trace_ids}")
 
+        # 检查是否是 JSON body 请求 (base64 或 URL)
+        content_type = headers.get("content-type", "")
+        if "application/json" in content_type:
+            # JSON body 请求
+            body = await request.json()
+            file_input = body.get("file")
+            language = body.get("language") or body.get("lang") or language
+            if not file_input:
+                raise ValueError("JSON body must contain 'file' field")
+            if not isinstance(file_input, str):
+                raise ValueError("'file' field must be a string (base64 or URL)")
+        else:
+            # multipart/form-data 请求
+            file_input = file
+            if file_input is None:
+                raise ValueError("Missing file field in form-data")
+
         if language:
             lang = language
         else:
             lang = "auto"
 
         # 提取音频元信息
-        file_io = await load_audio_input(file)
-        audio_meta = extract_audio_metadata(file, file_io)
+        file_io = await load_audio_input(file_input)
+        audio_meta = extract_audio_metadata(file_input, file_io)
         # 重置指针到开头，因为 extract_audio_metadata 内部调用 torchaudio.info 移动了指针
         file_io.seek(0)
         logger.info(f"[{endpoint}] Audio metadata: {format_audio_metadata(audio_meta)}")
 
         # 传入已加载的 file_io，避免重复读取导致文件指针失效
-        result = await audio_to_text([file], lang, request, file_ios=[file_io])
+        result = await audio_to_text([file_input], lang, request, file_ios=[file_io])
 
         global _last_request_time
         _last_request_time = time.time()  # 更新最后请求时间
