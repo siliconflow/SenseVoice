@@ -8,7 +8,7 @@
 #   TORCH_INDEX_URL: PyTorch index URL (default: cu124 for RTX 4090, cu128 for RTX 5090)
 
 # ==================== Stage 1: Build dependencies ====================
-FROM mirror.gcr.io/library/python:3.10-slim-bookworm AS builder
+FROM python:3.10-slim-bookworm AS builder
 
 # Build arguments for PyTorch version selection
 ARG TORCH_VERSION=2.5.1
@@ -39,7 +39,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ==================== Stage 2: Runtime image ====================
-FROM mirror.gcr.io/library/python:3.10-slim-bookworm AS runtime
+FROM python:3.10-slim-bookworm AS runtime
 
 # Use Aliyun mirror for apt
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
