@@ -16,8 +16,15 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
+
+# Prometheus metrics
+try:
+    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+    _PROMETHEUS_AVAILABLE = True
+except ImportError:
+    _PROMETHEUS_AVAILABLE = False
 from typing_extensions import Annotated
 from typing import List, Optional, Union, Callable
 from enum import Enum
@@ -31,6 +38,7 @@ TARGET_FS = 16000
 
 # 大文件流式处理配置
 LARGE_FILE_THRESHOLD_MB = float(os.getenv("LARGE_FILE_THRESHOLD_MB", "50"))  # 大文件阈值(MB)，默认50MB
+MAX_FILE_SIZE_MB = float(os.getenv("MAX_FILE_SIZE_MB", "500"))  # 最大文件大小限制(MB)
 TEMP_FILE_CLEANUP_DELAY = int(os.getenv("TEMP_FILE_CLEANUP_DELAY", "300"))  # 临时文件清理延迟(秒)，默认5分钟
 TEMP_FILE_DIR = os.getenv("TEMP_FILE_DIR", "")  # 临时文件目录，为空时使用系统临时目录
 
@@ -43,6 +51,30 @@ GRACEFUL_SHUTDOWN_TIMEOUT = int(os.getenv("GRACEFUL_SHUTDOWN_TIMEOUT", "30"))  #
 _is_shutting_down = False
 _active_requests = 0
 _shutdown_event = asyncio.Event()
+
+# Prometheus metrics
+if _PROMETHEUS_AVAILABLE:
+    ASR_REQUESTS_TOTAL = Counter(
+        "asr_requests_total", "Total ASR requests", ["endpoint", "status"]
+    )
+    ASR_REQUEST_DURATION = Histogram(
+        "asr_request_duration_seconds", "ASR request duration", ["endpoint"]
+    )
+    ASR_INFERENCE_DURATION = Histogram(
+        "asr_inference_duration_seconds", "ASR inference duration", ["backend"]
+    )
+    ASR_AUDIO_DURATION = Histogram(
+        "asr_audio_duration_seconds", "Input audio duration in seconds"
+    )
+    ASR_GPU_MEMORY_BYTES = Gauge(
+        "asr_gpu_memory_bytes", "GPU memory allocated", ["device"]
+    )
+    ASR_ACTIVE_REQUESTS = Gauge(
+        "asr_active_requests", "Current active requests"
+    )
+    ASR_MODEL_LOADED = Gauge(
+        "asr_model_loaded", "Model loaded status (1=loaded, 0=not)"
+    )
 
 # 临时文件管理器
 class TempFileManager:
@@ -376,8 +408,10 @@ except Exception as e:
 regex = r"<\|.*\|>"
 
 _last_request_time = 0  # 上次成功请求的时间戳
+_last_ready_inference_time = 0.0  # 上次就绪探针推理测试时间戳
 AUDIO_TEST_DIR = "test_audios"
-AUDIO_TEST_COOLDOWN_SECONDS = 3600  # 启动时已测试，跳过后续推理测试
+READY_INFERENCE_COOLDOWN = int(os.getenv("READY_INFERENCE_COOLDOWN", "60"))  # 推理测试冷却时间（秒）
+READY_INFERENCE_IDLE_THRESHOLD = int(os.getenv("READY_INFERENCE_IDLE_THRESHOLD", "60"))  # 业务请求空闲阈值（秒）
 
 # 可选：模型推理锁，防止并发请求导致 GPU 资源竞争（通过环境变量开启）
 _model_inference_lock = threading.Lock() if ENABLE_INFERENCE_LOCK else None
@@ -420,6 +454,13 @@ async def wait_for_requests_complete():
     else:
         logger.info("Graceful shutdown complete. All requests finished.")
 
+    # 清理所有临时文件
+    try:
+        temp_file_manager.cleanup_all()
+        logger.info("Temp files cleaned up.")
+    except Exception as e:
+        logger.warning(f"Temp file cleanup error: {e}")
+
     _shutdown_event.set()
     sys.exit(0)
 
@@ -454,12 +495,22 @@ async def graceful_shutdown_middleware(request: Request, call_next):
 
     # 增加活跃请求计数
     _active_requests += 1
+    if _PROMETHEUS_AVAILABLE:
+        ASR_ACTIVE_REQUESTS.set(_active_requests)
+    start = time.time()
+    status_code = 500
     try:
         response = await call_next(request)
+        status_code = response.status_code
         return response
     finally:
         # 减少活跃请求计数
         _active_requests -= 1
+        if _PROMETHEUS_AVAILABLE:
+            ASR_ACTIVE_REQUESTS.set(_active_requests)
+            duration = time.time() - start
+            ASR_REQUEST_DURATION.labels(endpoint=request.url.path).observe(duration)
+            ASR_REQUESTS_TOTAL.labels(endpoint=request.url.path, status=str(status_code)).inc()
 
 
 def _perform_inference_test():
@@ -505,70 +556,95 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus 指标端点"""
+    if not _PROMETHEUS_AVAILABLE:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "prometheus-client not installed"},
+        )
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+
 @app.get("/ready")
 async def ready():
-    """就绪健康检查 (Readiness Probe) - 检查模型和系统状态"""
-    global _last_request_time
-    current_time = time.time()
+    """就绪健康检查 (Readiness Probe) - 检查模型、资源，并执行实际推理测试（带冷却和空闲检测）"""
+    global _last_ready_inference_time
     errors = []
+    current_time = time.time()
 
-    # 1. 检查系统内存
-    mem = psutil.virtual_memory()
-    if mem.available < 512 * 1024 * 1024:  # < 512MB
-        errors.append(f"insufficient_memory: available={mem.available/1024/1024:.0f}MB")
-    if mem.percent > 90:
-        errors.append(f"high_memory_usage: {mem.percent}%")
+    # Update Prometheus gauges
+    if _PROMETHEUS_AVAILABLE:
+        ASR_MODEL_LOADED.set(1 if _model_loaded else 0)
 
-    # 2. 检查 GPU 状态
-    if torch.cuda.is_available():
-        try:
-            gpu_mem = torch.cuda.get_device_properties(0)
-            allocated = torch.cuda.memory_allocated(0) / 1024 / 1024
-            reserved = torch.cuda.memory_reserved(0) / 1024 / 1024
-            if allocated / gpu_mem.total_memory * 100 > 85:
-                errors.append(f"high_gpu_memory: {allocated:.0f}MB/{gpu_mem.total_memory/1024/1024:.0f}MB ({allocated/gpu_mem.total_memory*100:.0f}%)")
-        except Exception as e:
-            errors.append(f"gpu_check_failed: {str(e)}")
-
-    # 3. 检查模型加载状态
+    # 1. 检查模型加载状态
     if not _model_loaded or _model_load_error:
         errors.append(f"model_not_ready: {_model_load_error or 'unknown'}")
 
-    # 4. 推理测试 (30 秒内无成功请求时执行)
-    inference_result = None
-    do_inference_test = True
+    # 2. 检查系统内存
+    try:
+        mem = psutil.virtual_memory()
+        if mem.available < 512 * 1024 * 1024:  # < 512MB
+            errors.append(f"insufficient_memory: available={mem.available/1024/1024:.0f}MB")
+        if mem.percent > 90:
+            errors.append(f"high_memory_usage: {mem.percent}%")
+    except Exception as e:
+        errors.append(f"memory_check_failed: {str(e)}")
 
-    if _last_request_time > 0 and (current_time - _last_request_time) < AUDIO_TEST_COOLDOWN_SECONDS:
-        do_inference_test = False  # 30 秒内有成功请求，跳过推理测试
+    # 3. 检查 GPU 状态
+    if torch.cuda.is_available():
+        try:
+            gpu_mem = torch.cuda.get_device_properties(0)
+            allocated = torch.cuda.memory_allocated(0)
+            total = gpu_mem.total_memory
+            if _PROMETHEUS_AVAILABLE:
+                ASR_GPU_MEMORY_BYTES.labels(device="0").set(allocated)
+            if allocated / total > 0.95:
+                errors.append(f"high_gpu_memory: {allocated/1024/1024:.0f}MB/{total/1024/1024:.0f}MB ({allocated/total*100:.0f}%)")
+        except Exception as e:
+            errors.append(f"gpu_check_failed: {str(e)}")
 
-    if do_inference_test:
-        inference_result, inf_error = _perform_inference_test()
-        if inf_error:
-            errors.append(f"inference_failed: {inf_error}")
+    # 4. 实际推理测试（带冷却和空闲检测）
+    inference_test_performed = False
+    inference_test_skipped = False
+    should_test = (
+        _last_ready_inference_time == 0
+        or (current_time - _last_ready_inference_time) > READY_INFERENCE_COOLDOWN
+    )
+
+    if should_test and _model_loaded:
+        # 如果近期有成功业务请求，跳过推理测试
+        if _last_request_time > 0 and (current_time - _last_request_time) < READY_INFERENCE_IDLE_THRESHOLD:
+            inference_test_skipped = True
+            logger.debug("/ready: skipping inference test, recent business requests detected")
+        else:
+            inference_result, inf_error = _perform_inference_test()
+            if inf_error:
+                errors.append(f"inference_test_failed: {inf_error}")
+            else:
+                _last_ready_inference_time = current_time
+                inference_test_performed = True
+                logger.debug("/ready: inference test passed")
 
     if errors:
+        logger.warning(f"/ready check failed: {errors}")
         return {"status": "not_ready", "errors": errors, "model": model_dir}, 503
 
     response = {
         "status": "ready",
         "model": model_dir,
-        "memory": {
-            "available_mb": round(mem.available / 1024 / 1024, 1),
-            "usage_percent": mem.percent,
-        },
     }
 
-    # 如果进行了推理测试，添加推理结果信息
-    if inference_result:
-        response["inference_test"] = {
-            "performed": True,
-            "text_preview": inference_result["text"][:100] if inference_result["text"] else "",
-        }
+    if inference_test_performed:
+        response["inference_test"] = {"performed": True}
+    elif inference_test_skipped:
+        response["inference_test"] = {"performed": False, "reason": "recent_requests"}
     else:
-        response["inference_test"] = {
-            "performed": False,
-            "reason": "recent_request",
-        }
+        response["inference_test"] = {"performed": False, "reason": "cooldown"}
 
     return response
 
@@ -603,6 +679,28 @@ async def turn_audio_to_text(
     global _last_request_time
     _last_request_time = time.time()  # 更新最后请求时间
     return {"result": result}
+
+
+async def download_url_with_retry(url: str, temp_path: str = None, timeout: float = 300.0) -> tuple[bytes, float]:
+    """下载URL音频文件，支持指数退避重试（最多3次）"""
+    last_exception = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url, timeout=timeout)
+                resp.raise_for_status()
+                content = resp.content
+                size_mb = len(content) / (1024 * 1024)
+                if temp_path:
+                    with open(temp_path, 'wb') as f:
+                        f.write(content)
+                return content, size_mb
+        except Exception as e:
+            last_exception = e
+            wait_time = 2 ** attempt
+            logger.warning(f"URL下载尝试 {attempt + 1} 失败: {url}: {e}，{wait_time}秒后重试...")
+            await asyncio.sleep(wait_time)
+    raise last_exception
 
 
 async def get_file_size_mb(file) -> float:
@@ -676,28 +774,29 @@ async def load_audio_input_streaming(file, temp_path: str = None) -> tuple[str, 
 
             return BytesIO(audio_bytes), None, size_mb
 
-        # 3. URL 方式 - 流式下载
+        # 3. URL 方式 - 带重试的下载
         if file.startswith('http://') or file.startswith('https://'):
-            async with httpx.AsyncClient() as client:
-                # 获取文件大小（如果支持）
-                head_resp = await client.head(file, timeout=30.0)
-                content_length = head_resp.headers.get('content-length')
-                size_mb = float(content_length) / (1024 * 1024) if content_length else 0.0
+            # 先检查文件大小
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                try:
+                    head_resp = await client.head(file, timeout=30.0)
+                    content_length = head_resp.headers.get('content-length')
+                    size_mb = float(content_length) / (1024 * 1024) if content_length else 0.0
+                    if size_mb > MAX_FILE_SIZE_MB:
+                        raise ValueError(f"URL文件过大: {size_mb:.2f}MB (最大{MAX_FILE_SIZE_MB}MB)")
+                except httpx.HTTPError:
+                    size_mb = 0.0
 
-                if is_large_file and size_mb > LARGE_FILE_THRESHOLD_MB:
-                    # 大文件流式下载到临时文件
-                    async with client.stream('GET', file, timeout=300.0) as response:
-                        response.raise_for_status()
-                        with open(temp_path, 'wb') as f:
-                            async for chunk in response.aiter_bytes(chunk_size=8192):
-                                f.write(chunk)
-                    temp_file_manager.track_file_size(temp_path, os.path.getsize(temp_path))
-                    return temp_path, temp_path, size_mb
-                else:
-                    # 小文件下载到内存
-                    resp = await client.get(file, timeout=300.0)
-                    resp.raise_for_status()
-                    return BytesIO(resp.content), None, size_mb
+            # 使用重试下载
+            content, size_mb = await download_url_with_retry(file, temp_path if is_large_file else None, timeout=300.0)
+            if size_mb > MAX_FILE_SIZE_MB:
+                raise ValueError(f"下载文件过大: {size_mb:.2f}MB (最大{MAX_FILE_SIZE_MB}MB)")
+
+            if is_large_file and temp_path:
+                temp_file_manager.track_file_size(temp_path, os.path.getsize(temp_path))
+                return temp_path, temp_path, size_mb
+            else:
+                return BytesIO(content), None, size_mb
 
     raise ValueError(f"无法识别的音频文件格式")
 
@@ -869,6 +968,14 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
         inference_duration = time.time() - inference_start
         logger.info(f"[{endpoint}] Model inference completed in {inference_duration:.3f}s")
 
+        # Record Prometheus metrics
+        if _PROMETHEUS_AVAILABLE:
+            ASR_INFERENCE_DURATION.labels(backend="funasr").observe(inference_duration)
+            for info in audio_infos:
+                dur = info.get("duration_seconds", 0)
+                if dur and dur > 0:
+                    ASR_AUDIO_DURATION.observe(dur)
+
         result = []
         for r in res:
             text = r["text"]
@@ -889,6 +996,21 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
 
 class SiliconFlowResponse(BaseModel):
     text: str
+    language: Optional[str] = None
+    usage: Optional[dict] = None
+
+
+def _extract_language_from_sensevoice(raw_text: str) -> Optional[str]:
+    """Extract language from SenseVoice raw output tags like <|zh|>, <|en|>."""
+    match = re.search(r'<\|([a-z]{2,3})\|>', raw_text)
+    if match:
+        lang_code = match.group(1)
+        lang_map = {
+            "zh": "Chinese", "en": "English", "ja": "Japanese",
+            "ko": "Korean", "yue": "Cantonese", "auto": "Auto",
+        }
+        return lang_map.get(lang_code, lang_code)
+    return None
 
 
 class TranscriptionRequest(BaseModel):
@@ -973,7 +1095,19 @@ async def siliconflow_transcribe(
         request_duration = time.time() - request_start_time
         logger.info(f"[{endpoint}] Request completed in {request_duration:.3f}s")
 
-        return SiliconFlowResponse(text=result[0]["text"])
+        # Extract language from raw output and build usage info
+        detected_language = _extract_language_from_sensevoice(result[0].get("raw_text", ""))
+        duration_seconds = audio_meta.get("duration_seconds", 0.0)
+        usage_info = {
+            "type": "duration",
+            "seconds": round(duration_seconds),
+        }
+
+        return SiliconFlowResponse(
+            text=result[0]["text"],
+            language=detected_language,
+            usage=usage_info,
+        )
 
     except ValueError as ve:
         logger.warning(f"[{endpoint}] Invalid request: {str(ve)}")
@@ -1011,8 +1145,8 @@ except ValueError:
 if __name__ == "__main__":
     import uvicorn
 
-    # 检查是否有通过环境变量设置端口
-    port = int(os.getenv("PORT", "50000"))
+    # 检查是否有通过环境变量设置端口（API_PORT 优先，兼容 PORT）
+    port = int(os.getenv("API_PORT", os.getenv("PORT", "50000")))
     host = os.getenv("HOST", "0.0.0.0")
 
     config = uvicorn.Config(

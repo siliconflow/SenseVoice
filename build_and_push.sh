@@ -4,10 +4,11 @@
 
 set -e
 
-# 配置变量
-REGISTRY="hub.6scloud.com"
-NAMESPACE="clxuaivn500083i7ncuxpw8cf"
-IMAGE_NAME="sensevoice"
+# 配置变量 (override via environment variables)
+REGISTRY="${REGISTRY:-hub.6scloud.com}"
+NAMESPACE="${NAMESPACE:-your-namespace}"
+IMAGE_NAME="${IMAGE_NAME:-sensevoice}"
+PLATFORM="${PLATFORM:-linux/amd64}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_RECORD="${SCRIPT_DIR}/docker_build_record.md"
 
@@ -86,7 +87,7 @@ build_image() {
 
     # 构建 linux/amd64 镜像
     docker buildx build \
-        --platform linux/amd64 \
+        --platform ${PLATFORM} \
         --tag "${full_image}" \
         --push \
         --build-arg BUILD_DATE="${build_date}" \
@@ -117,7 +118,7 @@ record_build() {
 - **Git 提交**: \`${git_commit}\`
 - **镜像地址**: \`${full_image}\`
 - **镜像大小**: ${image_size}
-- **平台**: linux/amd64
+- **平台**: ${PLATFORM}
 
 ---"
 

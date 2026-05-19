@@ -13,3 +13,4 @@ gradio
 fastapi>=0.111.1
 psutil
 httpx
+prometheus-client>=0.20.0

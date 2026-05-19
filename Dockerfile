@@ -77,13 +77,17 @@ ENV PYTHONUNBUFFERED=1 \
     TEMP_DIR=/tmp/sensevoice \
     LOG_DIR=/app/logs \
     MODELSCOPE_CACHE=/models \
-    HF_HOME=/tmp/.cache \
+    HF_HOME=/models \
     SENSEVOICE_DEVICE="cuda" \
+    API_PORT=80 \
     GRACEFUL_SHUTDOWN_TIMEOUT="30"
+
+# Expose port
+EXPOSE 80
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -sf http://localhost:50000/health || exit 1
+    CMD curl -sf http://localhost:80/health || exit 1
 
 # Default command
 CMD ["python", "api.py"]
