@@ -678,7 +678,16 @@ async def turn_audio_to_text(
     result = await audio_to_text(files, lang, request)
     global _last_request_time
     _last_request_time = time.time()  # 更新最后请求时间
-    return {"result": result}
+
+    # 计算总音频时长（用于计费）
+    total_duration = sum(r.get("duration_seconds", 0.0) for r in result)
+    return {
+        "result": result,
+        "usage": {
+            "type": "duration",
+            "seconds": round(total_duration),
+        },
+    }
 
 
 async def download_url_with_retry(url: str, temp_path: str = None, timeout: float = 300.0) -> tuple[bytes, float]:
@@ -977,12 +986,14 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
                     ASR_AUDIO_DURATION.observe(dur)
 
         result = []
-        for r in res:
+        for idx, r in enumerate(res):
             text = r["text"]
+            info = audio_infos[idx] if idx < len(audio_infos) else {}
             result.append({
                 "raw_text": text,
                 "clean_text": re.sub(regex, "", text, 0, re.MULTILINE),
                 "text": rich_transcription_postprocess(text),
+                "duration_seconds": info.get("duration_seconds", 0.0),
             })
 
         total_duration = time.time() - process_start
