@@ -30,9 +30,10 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Install PyTorch with specific version and CUDA support
+# NOTE: torchaudio version must match torch exactly to avoid ABI mismatch
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch==${TORCH_VERSION} torchaudio --index-url ${TORCH_INDEX_URL}
+    pip install --no-cache-dir torch==${TORCH_VERSION} torchaudio==${TORCH_VERSION} --index-url ${TORCH_INDEX_URL}
 
 # Install other dependencies
 COPY requirements.txt .

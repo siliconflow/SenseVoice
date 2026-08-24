@@ -26,3 +26,14 @@ emotion2vec*
 GPT-SoVITS*
 modelscope_models
 examples/aishell/llm_asr_nar/*
+
+# Deployment configs (private registry references, not for public fork)
+k8s-deployment.yaml
+docker_build_record.md
+push-to-siliconcloud.sh
+
+# Personal / privacy data
+test_audios/13918993679-2601141717.mp3
+
+# Test cache
+.pytest_cache/

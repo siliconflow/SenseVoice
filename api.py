@@ -1,7 +1,7 @@
 # Set the device with environment, default is cuda:0
 # export SENSEVOICE_DEVICE=cuda:1
 
-import os, re
+import os, re, math
 import sys
 import signal
 import base64
@@ -685,7 +685,7 @@ async def turn_audio_to_text(
         "result": result,
         "usage": {
             "type": "duration",
-            "seconds": round(total_duration),
+            "seconds": int(math.ceil(total_duration)),
         },
     }
 
@@ -1108,10 +1108,10 @@ async def siliconflow_transcribe(
 
         # Extract language from raw output and build usage info
         detected_language = _extract_language_from_sensevoice(result[0].get("raw_text", ""))
-        duration_seconds = audio_meta.get("duration_seconds", 0.0)
+        duration_seconds = audio_meta.duration_seconds
         usage_info = {
             "type": "duration",
-            "seconds": round(duration_seconds),
+            "seconds": int(math.ceil(duration_seconds)),
         }
 
         return SiliconFlowResponse(
