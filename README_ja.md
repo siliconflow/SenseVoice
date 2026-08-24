@@ -11,7 +11,7 @@ SenseVoiceは、音声認識（ASR）、言語識別（LID）、音声感情認�
  
 <div align="center">  
 <h4>
-<a href="https://funaudiollm.github.io/"> ホームページ </a>
+<a href="https://www.funasr.com/en/"> ホームページ </a>
 ｜<a href="#最新动态"> 最新情報 </a>
 ｜<a href="#性能评测"> 性能評価 </a>
 ｜<a href="#环境安装"> 環境インストール </a>
@@ -19,29 +19,35 @@ SenseVoiceは、音声認識（ASR）、言語識別（LID）、音声感情認�
 ｜<a href="#联系我们"> お問い合わせ </a>
 </h4>
 
-モデルリポジトリ：[modelscope](https://www.modelscope.cn/models/iic/SenseVoiceSmall)，[huggingface](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
+モデルリポジトリ：[modelscope](https://www.modelscope.cn/models/iic/SenseVoiceSmall)，[huggingface](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)，[GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF)
 
 オンライン体験：
 [modelscope demo](https://www.modelscope.cn/studios/iic/SenseVoice), [huggingface space](https://huggingface.co/spaces/FunAudioLLM/SenseVoice)
 
 </div>
 
+> **公開済みcheckpointの範囲：** SenseVoiceSmallは中国語、広東語、英語、日本語、韓国語のASRと言語識別に対応し、感情・音声イベントタグも出力します。話者分離はFunASRが独立したFSMN-VADとCAM++を組み合わせるパイプライン機能であり、SenseVoiceSmall checkpoint自体の出力ではありません。
+
 <a name="核心功能"></a>
 # コア機能 🎯
 **SenseVoice**は、高精度な多言語音声認識、感情認識、および音声イベント検出に焦点を当てています。
-- **多言語認識：** 40万時間以上のデータを使用してトレーニングされ、50以上の言語をサポートし、認識性能はWhisperモデルを上回ります。
+- **研究範囲と公開済みcheckpoint：** より広いSenseVoice研究では40万時間以上の学習データと50以上の言語対応が報告されています。公開済みのSenseVoiceSmall checkpointは中国語、広東語、英語、日本語、韓国語に対応し、下記のbenchmark比較は記載されたタスクと言語に限定されます。
 - **リッチテキスト認識：** 
   - 優れた感情認識能力を持ち、テストデータで現在の最良の感情認識モデルの効果を達成および上回ります。
   - 音声イベント検出能力を提供し、音楽、拍手、笑い声、泣き声、咳、くしゃみなどのさまざまな一般的な人間とコンピュータのインタラクションイベントを検出します。
-- **効率的な推論：** SenseVoice-Smallモデルは非自己回帰エンドツーエンドフレームワークを採用しており、推論遅延が非常に低く、10秒の音声の推論に70msしかかかりません。Whisper-Largeより15倍高速です。
+- **効率的な推論：** SenseVoiceSmallは非自己回帰エンドツーエンドフレームワークを採用し、低遅延で推論します。テスト条件と速度比較は下記のbenchmarkを参照してください。
 - **簡単な微調整：** 便利な微調整スクリプトと戦略を提供し、ユーザーがビジネスシナリオに応じてロングテールサンプルの問題を簡単に解決できるようにします。
 - **サービス展開：** マルチコンカレントリクエストをサポートする完全なサービス展開パイプラインを提供し、クライアントサイドの言語にはPython、C++、HTML、Java、C#などがあります。
 
 <a name="最新动态"></a>
 # 最新情報 🔥
+- 2026/07: **FunASR 1.3.29 で SenseVoice の VAD 区間タイムスタンプを復元** — token タイムスタンプと句読点モデルがない場合でも、`sentence_timestamp=True` は各 VAD 音声区間を `sentence_info` で返すようになり、字幕やクリッピングのクライアントが空のタイムラインではなく利用可能な区間境界を取得できます。`pip install -U "funasr==1.3.29"` でインストールできます。[リリースノート](https://github.com/modelscope/FunASR/releases/tag/v1.3.29) · [PyPI](https://pypi.org/project/funasr/1.3.29/)
+- 2026/07: **FunASR 1.3.27 で SenseVoice の検出言語メタデータを追加** — OpenAI 互換エンドポイントが、検出した `zh`、`en`、`yue`、`ja`、`ko` を `verbose_json.language` に返すようになりました。`pip install -U "funasr==1.3.27"` でインストールできます。[リリースノート](https://github.com/modelscope/FunASR/releases/tag/v1.3.27) · [API ガイド](https://www.funasr.com/en/blog/funasr-v1-3-27-language-metadata-vllm-fallback.html) · [PyPI](https://pypi.org/project/funasr/1.3.27/)
+- 2026/06: **SenseVoice on llama.cpp / GGUF** — CPU/エッジ端末で単一の自己完結バイナリとして実行できます（whisper.cpp 風、内蔵 VAD、Python 不要）。q8 モデルは約 254 MB で精度を維持します。[runtime/llama.cpp/](./runtime/llama.cpp/) · [Releases](https://github.com/QwenAudio/SenseVoice/releases) · [funasr.com/llama-cpp](https://www.funasr.com/llama-cpp.html) · [Hugging Face GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF)
+- 2026/05: FunASRはSenseVoiceSmallに独立したFSMN-VAD、CAM++、句読点モデルを組み合わせ、文単位の話者ラベルを生成できます。話者分離はSenseVoiceSmall checkpointのネイティブ出力ではありません。
 - 2024/7：新しく[ONNX](./demo_onnx.py)と[libtorch](./demo_libtorch.py)のエクスポート機能を追加し、Pythonバージョンのランタイム：[funasr-onnx-0.4.0](https://pypi.org/project/funasr-onnx/)、[funasr-torch-0.1.1](https://pypi.org/project/funasr-torch/)も提供開始。
 - 2024/7: [SenseVoice-Small](https://www.modelscope.cn/models/iic/SenseVoiceSmall) 多言語音声理解モデルがオープンソース化されました。中国語、広東語、英語、日本語、韓国語の多言語音声認識、感情認識、およびイベント検出能力をサポートし、非常に低い推論遅延を実現しています。
-- 2024/7: CosyVoiceは自然な音声生成に取り組んでおり、多言語、音色、感情制御をサポートします。多言語音声生成、ゼロショット音声生成、クロスランゲージ音声クローン、および指示に従う能力に優れています。[CosyVoice repo](https://github.com/FunAudioLLM/CosyVoice) and [CosyVoice オンライン体験](https://www.modelscope.cn/studios/iic/CosyVoice-300M).
+- 2024/7: CosyVoiceは自然な音声生成に取り組んでおり、多言語、音色、感情制御をサポートします。多言語音声生成、ゼロショット音声生成、クロスランゲージ音声クローン、および指示に従う能力に優れています。[CosyVoice repo](https://github.com/QwenAudio/CosyVoice) and [CosyVoice オンライン体験](https://www.modelscope.cn/studios/iic/CosyVoice-300M).
 - 2024/7: [FunASR](https://github.com/modelscope/FunASR) は、音声認識（ASR）、音声活動検出（VAD）、句読点復元、言語モデル、話者検証、話者分離、およびマルチトーカーASRなどの機能を提供する基本的な音声認識ツールキットです。
 
 <a name="Benchmarks"></a>
@@ -79,7 +85,7 @@ SenseVoiceは音声データのみでトレーニングされていますが、�
 
 ## 推論効率
 
-SenseVoice-smallモデルは非自己回帰エンドツーエンドアーキテクチャを採用しており、推論遅延が非常に低いです。Whisper-Smallモデルと同等のパラメータ量で、Whisper-Smallモデルより5倍高速で、Whisper-Largeモデルより15倍高速です。同時に、SenseVoice-smallモデルは音声の長さが増加しても、推論時間に明らかな増加はありません。
+下図のbenchmark設定では、SenseVoiceSmallは非自己回帰エンドツーエンドアーキテクチャを採用し、同程度のパラメータ数でWhisper-Smallより5倍以上、Whisper-Largeより15倍高速です。
 
 <div align="center">  
 <img src="image/inference.png" width="1000" />
@@ -91,6 +97,8 @@ SenseVoice-smallモデルは非自己回帰エンドツーエンドアーキテ�
 ```shell
 pip install -r requirements.txt
 ```
+
+SenseVoiceSmall のサンプルと FunASR の話者分離パイプラインには `funasr>=1.3.26` が必要です。以前にこのリポジトリをインストール済みの場合は、デモを再実行する前に `pip install -U "funasr>=1.3.26"` を実行してください。
 
 <a name="用法教程"></a>
 # 使用方法 🛠️
@@ -243,7 +251,7 @@ fastapi run --port 50000
 ### トレーニング環境のインストール
 
 ```shell
-git clone https://github.com/alibaba/FunASR.git && cd FunASR
+git clone https://github.com/modelscope/FunASR.git && cd FunASR
 pip3 install -e ./
 ```
 
@@ -344,6 +352,7 @@ python webui.py
 ## 注目すべきサードパーティの取り組み
 - Triton (GPU) デプロイメントのベストプラクティス：Triton + TensorRT を使用し、FP32 でテスト。V100 GPU で加速比 526 を達成。FP16 のサポートは進行中です。[リポジトリ](https://github.com/modelscope/FunASR/blob/main/runtime/triton_gpu/README.md)
 - Sherpa-onnx デプロイメントのベストプラクティス：SenseVoice を10種類のプログラミング言語（C++, C, Python, C#, Go, Swift, Kotlin, Java, JavaScript, Dart）で使用可能。また、iOS, Android, Raspberry Pi などのプラットフォームでも SenseVoice をデプロイできます。[リポジトリ](https://k2-fsa.github.io/sherpa/onnx/sense-voice/index.html)
+- [Orca](https://github.com/stablyai/orca) は sherpa-onnx を通じて SenseVoice のローカル・オフライン音声認識を統合し、macOS、Linux、Windows で中国語、英語、日本語、韓国語、広東語を自動検出します。この統合は [#7436](https://github.com/stablyai/orca/pull/7436) でマージされ、現在は [v1.4.159-rc.1 プレリリース](https://github.com/stablyai/orca/releases/tag/v1.4.159-rc.1) で利用できます。Orca v1.4.158 安定版にはまだ含まれていません。
 - [SenseVoice.cpp](https://github.com/lovemefan/SenseVoice.cpp) GGMLに基づいて純粋なC/C++でSenseVoiceを推測し、3ビット、4ビット、5ビット、8ビット量子化などをサポートし、サードパーティの依存関係はありません。
 - [streaming-sensevoice](https://github.com/pengzhendong/streaming-sensevoice) ストリーム型SenseVoiceは、チャンク（chunk）方式で推論を行います。擬似ストリーミング処理を実現するために、一部の精度を犠牲にして切り捨て注意機構（truncated attention）を採用しています。さらに、この技術はCTCプレフィックスビームサーチ（CTC prefix beam search）とホットワード強化機能もサポートしています。
 - [OmniSenseVoice](https://github.com/lifeiteng/OmniSenseVoice) は、超高速推論とバッチ処理のために最適化されています。
@@ -355,4 +364,3 @@ python webui.py
 |                          FunASR                          |
 |:--------------------------------------------------------:|
 | <img src="image/dingding_funasr.png" width="250"/></div> |
-

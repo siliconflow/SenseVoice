@@ -671,11 +671,12 @@ async def turn_audio_to_text(
     files: Annotated[List[UploadFile], File(description="wav or mp3 audios in 16KHz")],
     keys: Annotated[str, Form(description="name of each audio joined with comma")] = None,
     lang: Annotated[Language, Form(description="language of audio content")] = "auto",
+    use_itn: Annotated[bool, Form(description="apply inverse text normalization")] = False,
 ):
     # 记录请求信息
     log_request_info(request, "/api/v1/asr")
 
-    result = await audio_to_text(files, lang, request)
+    result = await audio_to_text(files, lang, request, use_itn=use_itn)
     global _last_request_time
     _last_request_time = time.time()  # 更新最后请求时间
 
@@ -863,7 +864,7 @@ async def load_audio_input(file) -> BytesIO:
     raise ValueError(f"无法识别的音频文件格式")
 
 
-async def audio_to_text(files: list, lang: str = "auto", request: Request = None, file_ios: list = None):
+async def audio_to_text(files: list, lang: str = "auto", request: Request = None, file_ios: list = None, use_itn: bool = True):
     """通用音频转文字逻辑，支持大文件流式处理
 
     Args:
@@ -964,14 +965,14 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
                 res = model.generate(
                     input=audios,
                     language=lang,
-                    use_itn=True,
+                    use_itn=use_itn,
                     batch_size_s=60,
                 )
         else:
             res = model.generate(
                 input=audios,
                 language=lang,
-                use_itn=True,
+                use_itn=use_itn,
                 batch_size_s=60,
             )
         inference_duration = time.time() - inference_start

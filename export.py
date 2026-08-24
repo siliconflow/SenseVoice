@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# -*- encoding: utf-8 -*-
+# Copyright FunASR (https://github.com/QwenAudio/SenseVoice). All Rights Reserved.
+#  MIT License  (https://opensource.org/licenses/MIT)
+
 import os
 import torch
 from funasr import AutoModel
@@ -42,7 +47,7 @@ print("token: {}".format(tokens))
 # Use example audio for testing
 test_wav = os.path.join(model_path, "example", "en.mp3")
 if os.path.exists(test_wav):
-    res = model_bin(wav_or_scp=test_wav, language_list=[3], textnorm_list=[15], tokenizer=tokenizer)
+    res = model_bin(wav_or_scp=test_wav, language_list=[0], textnorm_list=[15], tokenizer=tokenizer)
     print("infer res: {}".format(res))
     print([rich_transcription_postprocess(i) for i in res])
 else:
