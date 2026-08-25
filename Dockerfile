@@ -4,7 +4,7 @@
 # Supports: RTX 4090 (Ada) and RTX 5090 (Blackwell)
 #
 # Build args:
-#   TORCH_VERSION: PyTorch version to install (default: 2.5.1 for RTX 4090, 2.6.0 for RTX 5090)
+#   TORCH_VERSION: PyTorch version to install (default: 2.5.1 for RTX 4090, 2.7.0 for RTX 5090)
 #   TORCH_INDEX_URL: PyTorch index URL (default: cu124 for RTX 4090, cu128 for RTX 5090)
 
 # ==================== Stage 1: Build dependencies ====================

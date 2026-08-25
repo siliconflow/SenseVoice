@@ -101,7 +101,7 @@ echo "OK — tags are unique."
 echo ""
 
 build_and_push "rtx4090" "2.5.1" "cu124"
-build_and_push "rtx5090" "2.6.0" "cu128"
+build_and_push "rtx5090" "2.7.0" "cu128"
 
 echo ">>> Updating deployment configs..."
 update_deployment "$PROJECT_DIR/k8s-deployment.yaml" "rtx4090"

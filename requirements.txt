@@ -3,12 +3,11 @@
 #
 # PyTorch 版本说明:
 # - RTX 4090/Ada (Compute Capability 8.9): torch 2.3-2.5 with CUDA 11.8-12.4
-# - RTX 5090/Blackwell (Compute Capability 10.0): torch>=2.6.0 with CUDA 12.8+
+# - RTX 5090/Blackwell (Compute Capability 10.0): torch>=2.7.0 with CUDA 12.8+
+#   (2.6.0 在 cu128 channel 中不可用；api.py _check_gpu_compatibility 强制 ≥2.7.0)
 #
 # 注意: torch 和 torchaudio 在 Dockerfile 中单独安装以支持多架构
-# 此处仅列出其他依赖
-torch>=2.12.1
-torchaudio>=2.11.0
+# 此处不列出 torch/torchaudio，避免 pip 从 PyPI 拉 CPU wheel 覆盖 CUDA wheel
 modelscope
 huggingface
 huggingface_hub

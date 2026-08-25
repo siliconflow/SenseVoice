@@ -71,8 +71,17 @@ _torch_mod.nn = types.SimpleNamespace(Module=_FakeModule, functional=None)
 _torch_mod.zeros = lambda *shape, **kw: _FakeTensor(shape=list(shape))
 _torch_mod.tensor = lambda data, **kw: _FakeTensor(data=data)
 _torch_mod.float32 = "float32"
+_torch_mod.bfloat16 = "bfloat16"
 _torch_mod.cuda = types.SimpleNamespace(is_available=lambda: False, device_count=lambda: 0)
 _torch_mod.no_grad = lambda: __import__("contextlib").nullcontext()
+# fake torch.backends（api.py 模块级设置 allow_tf32）
+# 注意：torch.backends.cudnn 和 torch.backends.cuda.matmul 是独立路径
+_torch_mod.backends = types.SimpleNamespace(
+    cuda=types.SimpleNamespace(matmul=types.SimpleNamespace(allow_tf32=True)),
+    cudnn=types.SimpleNamespace(allow_tf32=True),
+)
+# fake torch.autocast（返回 contextlib.nullcontext）
+_torch_mod.autocast = lambda **kw: __import__("contextlib").nullcontext()
 
 # fake psutil
 _psutil_mod = types.ModuleType("psutil")
@@ -313,3 +322,133 @@ def test_usage_type_field_fixed(client):
     )
     assert resp.status_code == 200
     assert resp.json()["usage"]["type"] == "duration"
+
+
+# ---------------------------------------------------------------------------
+# 5. 新增测试：get_file_size_mb、duration 提取顺序、model 未加载 503
+# ---------------------------------------------------------------------------
+
+def test_get_file_size_mb_base64():
+    """get_file_size_mb 对 base64 字符串应返回估算大小（len * 3/4）。"""
+    import asyncio
+    # 1MB base64 数据：解码后约 1MB，编码后 ~1.33MB
+    b64_str = "A" * 1400000
+    size_mb = asyncio.get_event_loop().run_until_complete(api.get_file_size_mb(b64_str))
+    assert size_mb > 0
+    expected = 1400000 * 3 / 4 / (1024 * 1024)
+    assert abs(size_mb - expected) < 0.01
+
+
+def test_get_file_size_mb_data_uri():
+    """get_file_size_mb 对 data: URI base64 应返回估算大小。"""
+    import asyncio
+    b64_data = "A" * 1400000
+    data_uri = f"data:audio/mp3;base64,{b64_data}"
+    size_mb = asyncio.get_event_loop().run_until_complete(api.get_file_size_mb(data_uri))
+    assert size_mb > 0
+    expected = 1400000 * 3 / 4 / (1024 * 1024)
+    assert abs(size_mb - expected) < 0.01
+
+
+def test_get_file_size_mb_url_returns_zero():
+    """get_file_size_mb 对 URL 应返回 0.0（依赖 load_audio_input_streaming 内部 HEAD 检查）。"""
+    import asyncio
+    size_mb = asyncio.get_event_loop().run_until_complete(
+        api.get_file_size_mb("https://example.com/audio.wav")
+    )
+    assert size_mb == 0.0
+
+
+def test_get_file_size_mb_uploadfile():
+    """get_file_size_mb 对带 size 属性的 UploadFile 应返回 file.size / 1MB。"""
+    import asyncio
+    fake_file = types.SimpleNamespace(size=10 * 1024 * 1024)  # 10MB
+    size_mb = asyncio.get_event_loop().run_until_complete(api.get_file_size_mb(fake_file))
+    assert abs(size_mb - 10.0) < 0.01
+
+
+def test_get_file_size_mb_bytesio():
+    """get_file_size_mb 对 BytesIO 应返回 buffer 大小。"""
+    import asyncio
+    buf = io.BytesIO(b"x" * (5 * 1024 * 1024))  # 5MB
+    size_mb = asyncio.get_event_loop().run_until_complete(api.get_file_size_mb(buf))
+    assert abs(size_mb - 5.0) < 0.01
+
+
+def test_duration_extracted_before_load():
+    """extract_audio_metadata 在 load_audio_with_torchaudio 之前调用，duration 应正确。
+
+    回归测试：B2/B3 修复前，audio_to_text 先 load 再 extract，指针在 EOF，
+    torchaudio.info 读到空，duration=0。
+    """
+    _set_audio_duration(7.3)  # 7.3 秒 → ceil 8
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * 16000)
+    buf.seek(0)
+    with TestClient(api.app) as c:
+        resp = c.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("test.wav", buf, "audio/wav")},
+            data={"model": "sensevoice"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 应为 ceil(7.3) = 8，不是 0
+    assert body["usage"]["seconds"] == 8, f"duration 提取失败: {body}"
+
+
+def test_model_not_loaded_returns_503():
+    """model 未加载时端点应返回 503 而非 500。"""
+    _set_audio_duration(3.0)
+    original = api._model_loaded
+    api._model_loaded = False
+    try:
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 16000)
+        buf.seek(0)
+        with TestClient(api.app) as c:
+            resp = c.post(
+                "/v1/audio/transcriptions",
+                files={"file": ("test.wav", buf, "audio/wav")},
+                data={"model": "sensevoice"},
+            )
+        assert resp.status_code == 503, f"expected 503, got {resp.status_code}: {resp.text}"
+        body = resp.json()
+        assert "error" in body
+    finally:
+        api._model_loaded = original
+
+
+def test_model_not_loaded_returns_503_api_v1():
+    """/api/v1/asr 同样应在 model 未加载时返回 503。"""
+    _set_audio_duration(3.0)
+    original = api._model_loaded
+    api._model_loaded = False
+    try:
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 16000)
+        buf.seek(0)
+        with TestClient(api.app) as c:
+            resp = c.post(
+                "/api/v1/asr",
+                files={"files": ("test.wav", buf, "audio/wav")},
+            )
+        assert resp.status_code == 503, f"expected 503, got {resp.status_code}: {resp.text}"
+    finally:
+        api._model_loaded = original
+

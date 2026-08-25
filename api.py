@@ -13,7 +13,7 @@ import logging
 import tempfile
 import threading
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext as _nullcontext
 from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -36,6 +36,14 @@ from dataclasses import dataclass
 
 TARGET_FS = 16000
 
+# 性能优化：启用 TF32（Blackwell/Ampere/Ada 的 tensor core 自动加速 FP32 matmul）
+# 对 FP32 推理无精度影响，仅作用于 CUDA matmul 和 cudnn
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+# bf16 autocast 开关（默认开启；Blackwell 上 BF16 比 FP32 快数倍，旧 GPU 自动降级）
+ENABLE_BF16_AUTACAST = os.getenv("ENABLE_BF16_AUTACAST", "true").lower() == "true"
+
 # 大文件流式处理配置
 LARGE_FILE_THRESHOLD_MB = float(os.getenv("LARGE_FILE_THRESHOLD_MB", "50"))  # 大文件阈值(MB)，默认50MB
 MAX_FILE_SIZE_MB = float(os.getenv("MAX_FILE_SIZE_MB", "500"))  # 最大文件大小限制(MB)
@@ -48,6 +56,7 @@ ENABLE_INFERENCE_LOCK = os.getenv("ENABLE_INFERENCE_LOCK", "false").lower() == "
 
 # K8s 优雅退出配置
 GRACEFUL_SHUTDOWN_TIMEOUT = int(os.getenv("GRACEFUL_SHUTDOWN_TIMEOUT", "30"))  # 优雅退出超时（秒）
+_shutdown_timeout = int(os.getenv("SHUTDOWN_TIMEOUT", str(GRACEFUL_SHUTDOWN_TIMEOUT)))  # uvicorn timeout_graceful_shutdown
 _is_shutting_down = False
 _active_requests = 0
 _shutdown_event = asyncio.Event()
@@ -537,13 +546,27 @@ def _perform_inference_test():
 
         waveform = waveform.mean(0)
 
-        # 执行推理
-        res = model.generate(
-            input=[waveform],
-            language="auto",
-            use_itn=True,
-            batch_size_s=60,
-        )
+        # 执行推理（与生产路径一致：推理锁 + bf16 autocast，但不记录 Prometheus 指标以免污染）
+        def _probe_inference():
+            return model.generate(
+                input=[waveform],
+                language="auto",
+                use_itn=True,
+                batch_size_s=60,
+            )
+
+        if ENABLE_BF16_AUTACAST and torch.cuda.is_available():
+            _probe_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        else:
+            _probe_ctx = _nullcontext()
+
+        if _model_inference_lock:
+            with _model_inference_lock:
+                with _probe_ctx:
+                    res = _probe_inference()
+        else:
+            with _probe_ctx:
+                res = _probe_inference()
 
         return {"text": res[0].get("text", "")}, None
     except Exception as e:
@@ -671,12 +694,22 @@ async def turn_audio_to_text(
     files: Annotated[List[UploadFile], File(description="wav or mp3 audios in 16KHz")],
     keys: Annotated[str, Form(description="name of each audio joined with comma")] = None,
     lang: Annotated[Language, Form(description="language of audio content")] = "auto",
-    use_itn: Annotated[bool, Form(description="apply inverse text normalization")] = False,
+    use_itn: Annotated[bool, Form(description="apply inverse text normalization")] = True,
 ):
     # 记录请求信息
     log_request_info(request, "/api/v1/asr")
 
-    result = await audio_to_text(files, lang, request, use_itn=use_itn)
+    try:
+        result = await audio_to_text(files, lang, request, use_itn=use_itn)
+    except RuntimeError as re:
+        # model 未加载等可恢复的服务级错误 → 503
+        if "Model not loaded" in str(re):
+            logger.error(f"[/api/v1/asr] Service unavailable: {str(re)}")
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"message": "Model not loaded", "type": "service_unavailable"}}
+            )
+        raise
     global _last_request_time
     _last_request_time = time.time()  # 更新最后请求时间
 
@@ -714,7 +747,7 @@ async def download_url_with_retry(url: str, temp_path: str = None, timeout: floa
 
 
 async def get_file_size_mb(file) -> float:
-    """获取上传文件或BytesIO的大小(MB)"""
+    """获取上传文件、BytesIO 或字符串（base64/URL）的大小(MB)"""
     # UploadFile 类型
     if hasattr(file, 'size') and file.size:
         return file.size / (1024 * 1024)
@@ -722,6 +755,16 @@ async def get_file_size_mb(file) -> float:
     # BytesIO 类型
     if hasattr(file, 'getbuffer'):
         return file.getbuffer().nbytes / (1024 * 1024)
+
+    # base64 字符串（data:... 或纯 base64）：编码膨胀率 ~4/3，解码后字节 ≈ len * 3/4
+    if isinstance(file, str):
+        if file.startswith('data:'):
+            b64_part = file.split(',', 1)[-1] if ',' in file else file[5:]
+            return len(b64_part) * 3 / 4 / (1024 * 1024)
+        if file.startswith('http://') or file.startswith('https://'):
+            return 0.0  # URL 无法本地估算，依赖 load_audio_input_streaming 内部 HEAD 检查
+        if re.match(r'^[A-Za-z0-9+/=]+$', file):
+            return len(file) * 3 / 4 / (1024 * 1024)
 
     return 0.0
 
@@ -878,9 +921,12 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
     process_start = time.time()
 
     try:
+        # 提前检查模型是否已加载（避免做完整流式加载后才失败）
+        if not _model_loaded:
+            raise RuntimeError("Model not loaded. Please check model initialization.")
+
         audios = []
         audio_infos = []
-        temp_files_to_cleanup = []  # 记录需要清理的临时文件
 
         # 预处理：加载所有 BytesIO（如果传入）
         ios_pool = file_ios or [None] * len(files)
@@ -890,7 +936,6 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
             # 从池中获取预加载的 BytesIO（如果有），否则动态加载
             file_io = next(file_io_iter) if file_io_iter else None
             temp_path = None
-            temp_file_manager_path = None
 
             # 如果没有预加载的 BytesIO，则需要加载
             if file_io is None:
@@ -901,29 +946,29 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
 
                 if use_streaming:
                     logger.info(f"[{endpoint}] Large file detected ({file_size_mb:.2f}MB > {LARGE_FILE_THRESHOLD_MB}MB), using streaming mode")
-                    temp_path, temp_file_manager_path, size_mb = await load_audio_input_streaming(f, temp_file_manager.create_temp_file()[0])
-                    temp_files_to_cleanup.append(temp_path)
+                    # load_audio_input_streaming 内部会写入 temp_path 并返回
+                    temp_path, _, _ = await load_audio_input_streaming(f, temp_file_manager.create_temp_file()[0])
                 else:
                     file_io = await load_audio_input(f)
 
             try:
+                # 先提取元信息（extract_audio_metadata 内部 torchaudio.info 会移动指针）
+                if temp_path:
+                    # streaming 路径：从临时文件读取元信息
+                    with open(temp_path, 'rb') as tf:
+                        audio_meta = extract_audio_metadata(f, BytesIO(tf.read()), audio_fs=None)
+                else:
+                    # 内存路径：先 extract 再 seek(0) 供后续 load 使用
+                    audio_meta = extract_audio_metadata(f, file_io, audio_fs=None)
+                    file_io.seek(0)
+
+                audio_infos.append(format_audio_metadata(audio_meta))
+
                 # 加载音频
                 if temp_path:
-                    # 从临时文件加载
                     waveform, audio_fs = load_audio_with_torchaudio(temp_path)
-                    # 清理临时文件（延迟清理）
-                    cleanup_path = temp_path
-                    if temp_file_manager_path:
-                        # 启动延迟清理线程
-                        _, cleanup_fn = temp_file_manager.create_temp_file()
-                        threading.Thread(target=cleanup_fn, daemon=True).start()
                 else:
-                    # 从内存加载
                     waveform, audio_fs = load_audio_with_torchaudio(file_io)
-
-                # 提取并记录音频元信息
-                audio_meta = extract_audio_metadata(f, file_io if file_io else BytesIO(), audio_fs)
-                audio_infos.append(format_audio_metadata(audio_meta))
 
                 # 重采样至目标采样率
                 if audio_fs != TARGET_FS:
@@ -935,8 +980,11 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
                 audios.append(waveform)
 
             finally:
-                # 确保 BytesIO 被关闭（临时文件不需要关闭）
-                if temp_path is None and file_io and hasattr(file_io, 'close'):
+                # streaming 路径：立即清理临时文件（音频已加载到内存 waveform）
+                if temp_path:
+                    temp_file_manager.cleanup_immediately(temp_path)
+                # 内存路径：关闭 BytesIO
+                elif file_io and hasattr(file_io, 'close'):
                     try:
                         file_io.close()
                     except Exception:
@@ -950,31 +998,33 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
         if lang == "":
             lang = "auto"
 
-        # 检查模型是否已加载
-        if not _model_loaded:
-            raise RuntimeError("Model not loaded. Please check model initialization.")
-
         # 可选：使用锁序列化模型推理（通过环境变量 ENABLE_INFERENCE_LOCK 开启）
         inference_start = time.time()
+        # 推理上下文：可选 bf16 autocast（默认开启，Blackwell 上显著加速）
+        def _do_inference():
+            return model.generate(
+                input=audios,
+                language=lang,
+                use_itn=use_itn,
+                batch_size_s=60,
+            )
+
+        if ENABLE_BF16_AUTACAST and torch.cuda.is_available():
+            _infer_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        else:
+            _infer_ctx = _nullcontext()
+
         if _model_inference_lock:
             with _model_inference_lock:
                 lock_wait_duration = time.time() - inference_start
                 if lock_wait_duration > 0.1:  # 如果等待锁超过100ms，记录日志
                     logger.info(f"[{endpoint}] Waited {lock_wait_duration:.3f}s for model lock")
 
-                res = model.generate(
-                    input=audios,
-                    language=lang,
-                    use_itn=use_itn,
-                    batch_size_s=60,
-                )
+                with _infer_ctx:
+                    res = _do_inference()
         else:
-            res = model.generate(
-                input=audios,
-                language=lang,
-                use_itn=use_itn,
-                batch_size_s=60,
-            )
+            with _infer_ctx:
+                res = _do_inference()
         inference_duration = time.time() - inference_start
         logger.info(f"[{endpoint}] Model inference completed in {inference_duration:.3f}s")
 
@@ -1127,31 +1177,23 @@ async def siliconflow_transcribe(
     except httpx.HTTPStatusError as he:
         logger.error(f"[{endpoint}] HTTP error fetching remote file: {str(he)}")
         raise
+    except RuntimeError as re:
+        # model 未加载等可恢复的服务级错误 → 503
+        if "Model not loaded" in str(re):
+            logger.error(f"[{endpoint}] Service unavailable: {str(re)}")
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"message": "Model not loaded", "type": "service_unavailable"}}
+            )
+        logger.error(f"[{endpoint}] Processing failed: RuntimeError: {str(re)}")
+        raise
     except Exception as e:
         logger.error(f"[{endpoint}] Processing failed: {type(e).__name__}: {str(e)}")
         raise
 
 
-# K8s 优雅退出支持
-_shutdown_event = threading.Event()
-_shutdown_timeout = int(os.getenv("SHUTDOWN_TIMEOUT", "30"))  # 优雅退出等待超时(秒)
-
-
-def _signal_handler(signum, frame):
-    """处理 SIGTERM/SIGINT 信号，设置优雅退出标志"""
-    signal_name = signal.Signals(signum).name
-    logger.info(f"Received {signal_name}, initiating graceful shutdown...")
-    _shutdown_event.set()
-
-
-# 注册信号处理器 (仅在主线程中)
-try:
-    signal.signal(signal.SIGTERM, _signal_handler)
-    signal.signal(signal.SIGINT, _signal_handler)
-    logger.info("Signal handlers registered for graceful shutdown")
-except ValueError:
-    # 非主线程时不注册信号处理器
-    pass
+# 注：信号处理器已在模块顶部 L481-482 注册（handle_sigterm + wait_for_requests_complete），
+# 此处不再重复注册，避免覆盖。_shutdown_timeout 已在 L59 定义。
 
 
 if __name__ == "__main__":
