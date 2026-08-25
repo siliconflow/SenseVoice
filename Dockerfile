@@ -13,10 +13,14 @@ FROM python:3.10-slim-bookworm AS builder
 # Build arguments for PyTorch version selection
 ARG TORCH_VERSION=2.5.1
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
+# Aliyun mirror 加速本地/国内构建；CI（GitHub Actions 海外 runner）设为 false 用默认源
+ARG USE_ALIYUN_MIRROR=true
 
-# Use Aliyun mirror for apt
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
+# Use Aliyun mirror for apt (optional, disable for CI)
+RUN if [ "$USE_ALIYUN_MIRROR" = "true" ]; then \
+        sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+        sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 WORKDIR /build
 
@@ -31,7 +35,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Install PyTorch with specific version and CUDA support
 # NOTE: torchaudio version must match torch exactly to avoid ABI mismatch
-RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+# CUDA torch 必须从 PyTorch 官方 index 安装，不受 Aliyun mirror 影响
+RUN if [ "$USE_ALIYUN_MIRROR" = "true" ]; then \
+        pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/; \
+    fi && \
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch==${TORCH_VERSION} torchaudio==${TORCH_VERSION} --index-url ${TORCH_INDEX_URL}
 
@@ -42,9 +49,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ==================== Stage 2: Runtime image ====================
 FROM python:3.10-slim-bookworm AS runtime
 
+# Re-declare ARG (ARG does not persist across stages)
+ARG USE_ALIYUN_MIRROR=true
+
 # Use Aliyun mirror for apt
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
+RUN if [ "$USE_ALIYUN_MIRROR" = "true" ]; then \
+        sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+        sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 # Install runtime dependencies (no CUDA, provided by runtime environment)
 RUN apt-get update && apt-get install -y --no-install-recommends \
