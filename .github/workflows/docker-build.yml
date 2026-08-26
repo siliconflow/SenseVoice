@@ -26,7 +26,7 @@ on:
 
 env:
   REGISTRY: hub.6scloud.com
-  NAMESPACE: clxuaivn500083i7ncuxpw8cf
+  NAMESPACE: d1r7umcsfi9c73b4drdg
   IMAGE_NAME: sensevoice
 
 jobs:

@@ -34,14 +34,14 @@ chmod +x build_and_push.sh
 
 ```bash
 # 拉取镜像
-docker pull hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sense voice:{version_tag}
+docker pull hub.6scloud.com/d1r7umcsfi9c73b4drdg/sensevoice:{version_tag}
 
 # 运行容器 (支持 GPU)
 docker run -d \
     --name sensevoice \
     -p 8000:8000 \
     -e SENSEVOICE_DEVICE=cuda \
-    hub.6scloud.com/clxuaivn500083i7ncuxpw8cf/sensevoice:{version_tag}
+    hub.6scloud.com/d1r7umcsfi9c73b4drdg/sensevoice:{version_tag}
 ```
 
 ### 3. 使用 Docker Compose
