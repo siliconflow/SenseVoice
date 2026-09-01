@@ -30,10 +30,6 @@ from typing_extensions import Annotated
 from typing import List, Optional, Union, Callable
 from enum import Enum
 import torchaudio
-import funasr  # noqa: F401
-# FUNASR_STRICT_IMPORT=1 环境变量（在 Dockerfile 中设置）让 funasr 在 import 失败时
-# fail-fast，便于调试。funasr 的循环 import（bin.train 等）是已知问题，但不影响
-# SenseVoiceSmall 模型注册（日志已证实注册表包含 SenseVoiceSmall）。
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
 from io import BytesIO
