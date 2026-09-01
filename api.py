@@ -287,56 +287,66 @@ model_dir = "iic/SenseVoiceSmall"
 
 
 def _validate_and_cleanup_modelscope_cache(model_id: str):
-    """校验 ModelScope 缓存完整性，缺失 config.yaml 时强制清理重下载。
+    """校验 ModelScope 缓存完整性，缺失配置文件时强制清理重下载。
 
-    funasr 的 download_from_ms 在 configuration.json 存在但 config.yaml 缺失时，
-    不会重新下载，导致 kwargs["model"] 保留 "iic/SenseVoiceSmall"（带前缀），
+    线上故障根因：ModelScope SDK snapshot_download 认为缓存已完整
+    ("No files to download")，但实际 configuration.json 和 config.yaml
+    都缺失。funasr 的 download_from_ms 在这两个文件都不存在时，不会
+    覆盖 kwargs["model"]，保留原始 "iic/SenseVoiceSmall"（带前缀），
     而 funasr 注册表里只有 "SenseVoiceSmall"（不带前缀），模型构建失败。
 
     此函数在 AutoModel(...) 调用前执行，检测到缓存不完整时删除缓存目录，
-    迫使 ModelScope SDK 重新下载。
+    迫使 ModelScope SDK 重新下载。校验是尽力而为的防护，内部异常不影响启动。
     """
-    cache_root = os.getenv("MODELSCOPE_CACHE", "/models")
-    namespace, _, name = model_id.partition("/")
-    # ModelScope 缓存路径在不同 SDK 版本中布局不同：
-    #   新版（flat）: $MODELSCOPE_CACHE/models/<namespace>/<model>/
-    #   旧版:        $MODELSCOPE_CACHE/hub/<namespace>/<model>/snapshots/<hash>/
-    # 两种都检查，提高健壮性
-    candidate_roots = [
-        Path(cache_root) / "models" / namespace / name,
-        Path(cache_root) / "hub" / namespace / name,
-    ]
-    model_cache_dirs = [d for d in candidate_roots if d.exists()]
+    try:
+        cache_root = os.getenv("MODELSCOPE_CACHE", "/models")
+        namespace, _, name = model_id.partition("/")
+        # ModelScope SDK 的 find_reusable_legacy_repo_dir 探测 6 种缓存布局，
+        # 必须全部覆盖，否则会漏掉实际缓存位置导致校验失效。
+        # 参见 modelscope/hub/utils/utils.py 的 legacy_candidates + hub_known。
+        candidate_roots = [
+            Path(cache_root) / namespace / name,                   # flat 顶层
+            Path(cache_root) / "hub" / namespace / name,           # 旧版 hub
+            Path(cache_root) / "models" / namespace / name,        # 新版 models
+            Path(cache_root) / "models" / f"{namespace}--{name}",  # safe_id 格式
+        ]
+        model_cache_dirs = [d for d in candidate_roots if d.exists()]
 
-    if not model_cache_dirs:
-        logger.info(f"ModelScope 缓存目录不存在（首次启动）: {model_id}")
-        return
+        if not model_cache_dirs:
+            logger.info(f"ModelScope 缓存目录不存在（首次启动）: {model_id}")
+            return
 
-    for model_cache_dir in model_cache_dirs:
-        # 新版 flat 结构直接在 model_cache_dir 下找配置；旧版在 snapshots/<hash>/ 下
-        if (model_cache_dir / "snapshots").exists():
-            search_dirs = list((model_cache_dir / "snapshots").iterdir())
-        else:
-            search_dirs = [model_cache_dir]
+        for model_cache_dir in model_cache_dirs:
+            # 旧版布局在 snapshots/<hash>/ 下存放文件；新版 flat 直接在目录下
+            if (model_cache_dir / "snapshots").exists():
+                # 只检查子目录，跳过杂散文件（.gitkeep/lock 等），避免误判为缓存损坏
+                search_dirs = [d for d in (model_cache_dir / "snapshots").iterdir() if d.is_dir()]
+            else:
+                search_dirs = [model_cache_dir]
 
-        if not search_dirs:
-            logger.warning(f"ModelScope snapshots 目录为空，清理缓存目录: {model_cache_dir}")
-            shutil.rmtree(model_cache_dir, ignore_errors=True)
-            continue
-
-        for search_dir in search_dirs:
-            config_yaml = search_dir / "config.yaml"
-            configuration_json = search_dir / "configuration.json"
-            # funasr download_from_ms 优先读 configuration.json，再读 config.yaml
-            # 两者都缺失时才会保留原始 model_id（带前缀），导致注册失败
-            if not config_yaml.exists() and not configuration_json.exists():
-                logger.error(
-                    f"ModelScope 缓存不完整: {search_dir} 缺少 config.yaml 和 configuration.json"
-                )
-                logger.warning(f"清理损坏的缓存目录: {model_cache_dir}")
+            if not search_dirs:
+                logger.warning(f"ModelScope snapshots 目录为空，清理缓存目录: {model_cache_dir}")
                 shutil.rmtree(model_cache_dir, ignore_errors=True)
-                return
-            logger.info(f"ModelScope 缓存校验通过: {search_dir}")
+                continue
+
+            for search_dir in search_dirs:
+                config_yaml = search_dir / "config.yaml"
+                configuration_json = search_dir / "configuration.json"
+                # funasr download_from_ms: configuration.json 或 config.yaml
+                # 存在时会覆盖 kwargs["model"] 为 yaml 里的值（不带前缀）。
+                # 两者都缺失时保留原始 model_id（带前缀）→ 注册失败。
+                if not config_yaml.exists() and not configuration_json.exists():
+                    logger.error(
+                        f"ModelScope 缓存不完整: {search_dir} 缺少 config.yaml 和 configuration.json"
+                    )
+                    logger.warning(f"清理损坏的缓存目录: {model_cache_dir}")
+                    shutil.rmtree(model_cache_dir, ignore_errors=True)
+                    break
+                logger.info(f"ModelScope 缓存校验通过: {search_dir}")
+    except Exception as e:
+        # 缓存校验是防护性逻辑，失败不应阻断启动。
+        # 真正的缓存问题会由后续 AutoModel 失败 → sys.exit → K8s 重启处理。
+        logger.warning(f"ModelScope 缓存校验异常（忽略）: {e}")
 
 
 # 标点模型配置 - 仅当手工指定时才加载
@@ -399,6 +409,10 @@ def _check_gpu_compatibility():
         logger.warning(f"GPU 兼容性检查失败: {e}")
 
     return True, warnings
+
+# 预声明模型状态变量（try 块内首次赋值，预声明供 /health、/ready 防御性访问）
+_model_loaded = False
+_model_load_error = None
 
 try:
     # 首先检查 GPU 兼容性
@@ -1263,8 +1277,8 @@ async def siliconflow_transcribe(
         raise
 
 
-# 注：信号处理器已在模块顶部 L481-482 注册（handle_sigterm + wait_for_requests_complete），
-# 此处不再重复注册，避免覆盖。_shutdown_timeout 已在 L59 定义。
+# 注：信号处理器 handle_sigterm + wait_for_requests_complete 已在模块顶部注册，
+# 此处不再重复注册，避免覆盖。_shutdown_timeout 已在模块顶部定义。
 
 
 if __name__ == "__main__":
