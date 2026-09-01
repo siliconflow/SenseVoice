@@ -5,6 +5,7 @@ import os, re, math
 import sys
 import signal
 import base64
+import shutil
 import httpx
 import psutil
 import time
@@ -29,6 +30,10 @@ from typing_extensions import Annotated
 from typing import List, Optional, Union, Callable
 from enum import Enum
 import torchaudio
+import funasr  # noqa: F401
+# FUNASR_STRICT_IMPORT=1 环境变量（在 Dockerfile 中设置）让 funasr 在 import 失败时
+# fail-fast，便于调试。funasr 的循环 import（bin.train 等）是已知问题，但不影响
+# SenseVoiceSmall 模型注册（日志已证实注册表包含 SenseVoiceSmall）。
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
 from io import BytesIO
@@ -52,7 +57,10 @@ TEMP_FILE_DIR = os.getenv("TEMP_FILE_DIR", "")  # 临时文件目录，为空时
 
 # 性能优化配置
 ENABLE_MODEL_WARMUP = os.getenv("ENABLE_MODEL_WARMUP", "false").lower() == "true"  # 默认不开启模型预热
-ENABLE_INFERENCE_LOCK = os.getenv("ENABLE_INFERENCE_LOCK", "false").lower() == "true"  # 默认不开启推理锁
+# 推理锁默认开启：asyncio.to_thread 让 model.generate 在线程池中执行，
+# funasr/CUDA 未保证 thread-safe，并发调用可能导致段错误或结果错乱。
+# 如确认模型线程安全且需要最大并发，可显式设为 false。
+ENABLE_INFERENCE_LOCK = os.getenv("ENABLE_INFERENCE_LOCK", "true").lower() == "true"
 
 # K8s 优雅退出配置
 GRACEFUL_SHUTDOWN_TIMEOUT = int(os.getenv("GRACEFUL_SHUTDOWN_TIMEOUT", "30"))  # 优雅退出超时（秒）
@@ -281,6 +289,60 @@ class Language(str, Enum):
 
 model_dir = "iic/SenseVoiceSmall"
 
+
+def _validate_and_cleanup_modelscope_cache(model_id: str):
+    """校验 ModelScope 缓存完整性，缺失 config.yaml 时强制清理重下载。
+
+    funasr 的 download_from_ms 在 configuration.json 存在但 config.yaml 缺失时，
+    不会重新下载，导致 kwargs["model"] 保留 "iic/SenseVoiceSmall"（带前缀），
+    而 funasr 注册表里只有 "SenseVoiceSmall"（不带前缀），模型构建失败。
+
+    此函数在 AutoModel(...) 调用前执行，检测到缓存不完整时删除缓存目录，
+    迫使 ModelScope SDK 重新下载。
+    """
+    cache_root = os.getenv("MODELSCOPE_CACHE", "/models")
+    namespace, _, name = model_id.partition("/")
+    # ModelScope 缓存路径在不同 SDK 版本中布局不同：
+    #   新版（flat）: $MODELSCOPE_CACHE/models/<namespace>/<model>/
+    #   旧版:        $MODELSCOPE_CACHE/hub/<namespace>/<model>/snapshots/<hash>/
+    # 两种都检查，提高健壮性
+    candidate_roots = [
+        Path(cache_root) / "models" / namespace / name,
+        Path(cache_root) / "hub" / namespace / name,
+    ]
+    model_cache_dirs = [d for d in candidate_roots if d.exists()]
+
+    if not model_cache_dirs:
+        logger.info(f"ModelScope 缓存目录不存在（首次启动）: {model_id}")
+        return
+
+    for model_cache_dir in model_cache_dirs:
+        # 新版 flat 结构直接在 model_cache_dir 下找配置；旧版在 snapshots/<hash>/ 下
+        if (model_cache_dir / "snapshots").exists():
+            search_dirs = list((model_cache_dir / "snapshots").iterdir())
+        else:
+            search_dirs = [model_cache_dir]
+
+        if not search_dirs:
+            logger.warning(f"ModelScope snapshots 目录为空，清理缓存目录: {model_cache_dir}")
+            shutil.rmtree(model_cache_dir, ignore_errors=True)
+            continue
+
+        for search_dir in search_dirs:
+            config_yaml = search_dir / "config.yaml"
+            configuration_json = search_dir / "configuration.json"
+            # funasr download_from_ms 优先读 configuration.json，再读 config.yaml
+            # 两者都缺失时才会保留原始 model_id（带前缀），导致注册失败
+            if not config_yaml.exists() and not configuration_json.exists():
+                logger.error(
+                    f"ModelScope 缓存不完整: {search_dir} 缺少 config.yaml 和 configuration.json"
+                )
+                logger.warning(f"清理损坏的缓存目录: {model_cache_dir}")
+                shutil.rmtree(model_cache_dir, ignore_errors=True)
+                return
+            logger.info(f"ModelScope 缓存校验通过: {search_dir}")
+
+
 # 标点模型配置 - 仅当手工指定时才加载
 _punc_model = os.getenv("SENSEVOICE_PUNC_MODEL", "")
 
@@ -350,6 +412,9 @@ try:
             logger.error(warning)
         raise RuntimeError(f"GPU 不兼容: {'; '.join(_gpu_warnings)}")
 
+    # 校验 ModelScope 缓存完整性（防止下载中断导致缓存损坏）
+    _validate_and_cleanup_modelscope_cache(model_dir)
+
     model_kwargs = {
         "model": model_dir,
         "trust_remote_code": True,
@@ -413,12 +478,15 @@ except Exception as e:
     _model_load_error = str(e)
     _model_loaded = False
     logger.error(f"模型加载失败: {e}")
+    logger.error("进程将在 5 秒后退出，K8s 会重启 pod 以恢复模型加载")
+    time.sleep(5)  # 给日志刷盘时间
+    sys.exit(1)
 
 regex = r"<\|.*\|>"
 
 _last_request_time = 0  # 上次成功请求的时间戳
+_last_failed_request_time = 0.0  # 上次失败请求的时间戳（用于 /ready 冷却窗口）
 _last_ready_inference_time = 0.0  # 上次就绪探针推理测试时间戳
-AUDIO_TEST_DIR = "test_audios"
 READY_INFERENCE_COOLDOWN = int(os.getenv("READY_INFERENCE_COOLDOWN", "60"))  # 推理测试冷却时间（秒）
 READY_INFERENCE_IDLE_THRESHOLD = int(os.getenv("READY_INFERENCE_IDLE_THRESHOLD", "60"))  # 业务请求空闲阈值（秒）
 
@@ -523,33 +591,15 @@ async def graceful_shutdown_middleware(request: Request, call_next):
 
 
 def _perform_inference_test():
-    """执行实际的模型推理测试"""
-    import glob
-
-    # 查找测试音频文件
-    audio_patterns = [f"{AUDIO_TEST_DIR}/*.wav", f"{AUDIO_TEST_DIR}/*.mp3", f"{AUDIO_TEST_DIR}/*.flac"]
-    test_files = []
-    for pattern in audio_patterns:
-        test_files.extend(glob.glob(pattern))
-
-    if not test_files:
-        return None, "no_test_audio"
-
+    """执行实际的模型推理测试，使用内置 1 秒静音合成音频"""
     try:
-        test_file = test_files[0]
-        waveform, audio_fs = torchaudio.load(test_file)
-
-        # 重采样至 16kHz
-        if audio_fs != TARGET_FS:
-            resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
-            waveform = resampler(waveform)
-
-        waveform = waveform.mean(0)
+        # 合成 1 秒静音音频（16kHz mono），与启动测试一致
+        test_waveform = torch.zeros(16000, dtype=torch.float32)
 
         # 执行推理（与生产路径一致：推理锁 + bf16 autocast，但不记录 Prometheus 指标以免污染）
         def _probe_inference():
             return model.generate(
-                input=[waveform],
+                input=test_waveform,
                 language="auto",
                 use_itn=True,
                 batch_size_s=60,
@@ -576,6 +626,11 @@ def _perform_inference_test():
 @app.get("/health")
 async def health():
     """存活健康检查 (Liveness Probe)"""
+    if not _model_loaded:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "model_not_loaded", "error": _model_load_error or "unknown"},
+        )
     return {"status": "ok"}
 
 
@@ -640,12 +695,23 @@ async def ready():
     )
 
     if should_test and _model_loaded:
-        # 如果近期有成功业务请求，跳过推理测试
-        if _last_request_time > 0 and (current_time - _last_request_time) < READY_INFERENCE_IDLE_THRESHOLD:
+        # 近期有成功请求 且 近期无失败请求 → 跳过推理测试
+        # 近期有失败请求 或 近期无任何请求 → 执行真实推理检查
+        has_recent_success = (
+            _last_request_time > 0
+            and (current_time - _last_request_time) < READY_INFERENCE_IDLE_THRESHOLD
+        )
+        has_recent_failure = (
+            _last_failed_request_time > 0
+            and (current_time - _last_failed_request_time) < READY_INFERENCE_IDLE_THRESHOLD
+        )
+
+        if has_recent_success and not has_recent_failure:
             inference_test_skipped = True
-            logger.debug("/ready: skipping inference test, recent business requests detected")
+            logger.debug("/ready: skipping inference test, recent successful requests detected")
         else:
-            inference_result, inf_error = _perform_inference_test()
+            # 在线程池中执行同步推理测试，避免阻塞事件循环（与 audio_to_text 路径一致）
+            _, inf_error = await asyncio.to_thread(_perform_inference_test)
             if inf_error:
                 errors.append(f"inference_test_failed: {inf_error}")
             else:
@@ -705,6 +771,8 @@ async def turn_audio_to_text(
         # model 未加载等可恢复的服务级错误 → 503
         if "Model not loaded" in str(re):
             logger.error(f"[/api/v1/asr] Service unavailable: {str(re)}")
+            global _last_failed_request_time
+            _last_failed_request_time = time.time()
             return JSONResponse(
                 status_code=503,
                 content={"error": {"message": "Model not loaded", "type": "service_unavailable"}}
@@ -1015,16 +1083,21 @@ async def audio_to_text(files: list, lang: str = "auto", request: Request = None
             _infer_ctx = _nullcontext()
 
         if _model_inference_lock:
-            with _model_inference_lock:
-                lock_wait_duration = time.time() - inference_start
-                if lock_wait_duration > 0.1:  # 如果等待锁超过100ms，记录日志
-                    logger.info(f"[{endpoint}] Waited {lock_wait_duration:.3f}s for model lock")
-
-                with _infer_ctx:
-                    res = _do_inference()
+            def _run_with_lock():
+                with _model_inference_lock:
+                    lock_wait_duration = time.time() - inference_start
+                    if lock_wait_duration > 0.1:  # 如果等待锁超过100ms，记录日志
+                        logger.info(f"[{endpoint}] Waited {lock_wait_duration:.3f}s for model lock")
+                    with _infer_ctx:
+                        return _do_inference()
+            # 在线程池中执行同步推理，避免阻塞 asyncio 事件循环
+            # （否则 /health 等探针请求会因事件循环被卡住而超时）
+            res = await asyncio.to_thread(_run_with_lock)
         else:
-            with _infer_ctx:
-                res = _do_inference()
+            def _run_inference():
+                with _infer_ctx:
+                    return _do_inference()
+            res = await asyncio.to_thread(_run_inference)
         inference_duration = time.time() - inference_start
         logger.info(f"[{endpoint}] Model inference completed in {inference_duration:.3f}s")
 
@@ -1181,6 +1254,8 @@ async def siliconflow_transcribe(
         # model 未加载等可恢复的服务级错误 → 503
         if "Model not loaded" in str(re):
             logger.error(f"[{endpoint}] Service unavailable: {str(re)}")
+            global _last_failed_request_time
+            _last_failed_request_time = time.time()
             return JSONResponse(
                 status_code=503,
                 content={"error": {"message": "Model not loaded", "type": "service_unavailable"}}
