@@ -127,33 +127,31 @@ jobs:
 
           if [[ -n "$(git ls-files -u)" ]]; then
             echo "::error::Residual conflicts after adjudication; opening issue"
+            {
+              echo '### 上游同步出现无法自动裁决的冲突'
+              echo
+              echo "- upstream HEAD: \`${UPSTREAM_HEAD}\`"
+              echo "- new commits: ${NEW_COMMITS} (merge-base \`${MERGE_BASE}\`)"
+              echo
+              echo '#### 上游新提交'
+              echo '```'
+              git log --oneline "${MERGE_BASE}..${UPSTREAM_HEAD}" | head -30
+              echo '```'
+              echo
+              echo '#### 自动裁决记录'
+              echo "- 已 DROP（不适用 fork）: ${DROPPED[*]:-（无）}"
+              echo "- 保留 ours（内容冲突）: ${KEPT_OURS[*]:-（无）}"
+              echo
+              echo '#### 残余冲突（需人工裁决）'
+              echo '```'
+              git ls-files -u
+              echo '```'
+              echo
+              echo '本 run 已中止。请人工执行 `git merge upstream/'"$UPSTREAM_BRANCH"'` 并按适配分支既有取舍（见 '"$ADAPTATION_BRANCH"' 上历史 merge commit 说明）解决冲突，处理完成后可关闭本 issue。'
+            } > /tmp/issue-body.md
             gh issue create \
               --title "upstream sync conflict: ${UPSTREAM_HEAD:0:7} needs manual merge" \
-              --body "$(cat <<ISSUE_EOF
-          ### 上游同步出现无法自动裁决的冲突
-
-          - upstream HEAD: \`${UPSTREAM_HEAD}\`
-          - new commits: ${NEW_COMMITS} (merge-base \`${MERGE_BASE}\`)
-
-          #### 上游新提交
-          \`\`\`
-          $(git log --oneline "${MERGE_BASE}..${UPSTREAM_HEAD}" | head -30)
-          \`\`\`
-
-          #### 自动裁决记录
-          - 已 DROP（不适用 fork）: ${DROPPED[*]:-（无）}
-          - 保留 ours（内容冲突）: ${KEPT_OURS[*]:-（无）}
-
-          #### 残余冲突（需人工裁决）
-          \`\`\`
-          $(git ls-files -u)
-          \`\`\`
-
-          本 run 已中止。请人工执行
-          \`git merge upstream/$UPSTREAM_BRANCH\`
-          并按适配分支既有取舍（见 ${ADAPTATION_BRANCH} 上历史 merge commit 说明）解决冲突，处理完成后可关闭本 issue。
-          ISSUE_EOF
-          )" || true
+              --body-file /tmp/issue-body.md || true
             exit 1
           fi
 
@@ -196,39 +194,38 @@ jobs:
         if: steps.check.outputs.has_updates == 'true' && inputs.dry_run != 'true'
         run: |
           SYNC_BRANCH="${{ steps.push.outputs.sync_branch }}"
-          BUILD_NOTE='（若未配置 SYNC_PAT，PR 不带 CI，auto-merge 立即生效；镜像构建由本 workflow 在合并落地后显式 dispatch。）'
           if [[ "${{ steps.merge.outputs.resolved }}" == "adjudicated" ]]; then
-            ADJUDICATION="#### 冲突裁决记录（人工复查重点）
+            adjudication="#### 冲突裁决记录（人工复查重点）
           - 已 DROP: \`${{ steps.merge.outputs.dropped }}\`（上游维护但本 fork 不适用）
           - 保留 ours: \`${{ steps.merge.outputs.kept_ours }}\`
           - 纯 -X ours 内联消解的上游 hunk 未逐条记录，建议对共享大文件（如 api.py）抽样 diff。"
           else
-            ADJUDICATION="合并干净（无冲突裁决）。"
+            adjudication="合并干净（无冲突裁决）。"
           fi
+          {
+            echo '## Summary'
+            echo
+            echo "自动同步上游 \`${UPSTREAM_REPO}\`@\`${UPSTREAM_HEAD:0:12}\` 到 \`${ADAPTATION_BRANCH}\`。"
+            echo
+            echo "$adjudication"
+            echo
+            echo "VERSION bump → \`${{ steps.bump.outputs.version }}\`。"
+            echo
+            echo '### 上游新提交'
+            echo '```'
+            git log --oneline "${{ steps.check.outputs.merge_base }}..${UPSTREAM_HEAD}" | head -30
+            echo '```'
+            echo
+            echo '### 后续'
+            echo "PR 合并后自动触发 \`docker-build.yml\` 双 GPU 镜像构建（tag 含 \`-v${{ steps.bump.outputs.version }}-\`）。"
+            echo
+            echo '（若未配置 SYNC_PAT，PR 不带 CI，auto-merge 立即生效；镜像构建由本 workflow 在合并落地后显式 dispatch。）'
+          } > /tmp/pr-body.md
           PR_URL=$(gh pr create \
             --base "$ADAPTATION_BRANCH" \
             --head "$SYNC_BRANCH" \
             --title "sync: upstream ${UPSTREAM_HEAD:0:7} (+${{ steps.check.outputs.new_commits }} commits)" \
-            --body "$(cat <<PR_EOF
-          ## Summary
-
-          自动同步上游 \`${UPSTREAM_REPO}\`@\`${UPSTREAM_HEAD:0:12}\` 到 \`${ADAPTATION_BRANCH}\`。
-
-          $ADJUDICATION
-
-          VERSION bump → \`${{ steps.bump.outputs.version }}\`。
-
-          ### 上游新提交
-          \`\`\`
-          $(git log --oneline "${{ steps.check.outputs.merge_base }}..${UPSTREAM_HEAD}" | head -30)
-          \`\`\`
-
-          ### 后续
-          PR 合并后自动触发 \`docker-build.yml\` 双 GPU 镜像构建（tag 含 \`-v${{ steps.bump.outputs.version }}-\`）。
-
-          $BUILD_NOTE
-          PR_EOF
-          )") || { echo "::error::gh pr create failed"; exit 1; }
+            --body-file /tmp/pr-body.md) || { echo "::error::gh pr create failed"; exit 1; }
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "::notice::PR created: $PR_URL"
           # auto-merge：带 CI 时等绿再合并，否则（GITHUB_TOKEN 无递归 PR 事件）立即合并
@@ -257,7 +254,9 @@ jobs:
 
       - name: Dry run summary
         if: inputs.dry_run == 'true' && steps.check.outputs.has_updates == 'true'
-        run: echo '::notice::Dry run: ${{ steps.check.outputs.new_commits }} new upstream commits; no merge / no PR (see step summary)'
+        run: |
+          echo "::notice::Dry run: ${{ steps.check.outputs.new_commits }} new upstream commits"
+          echo "no merge / no PR (see step summary)"
 
   mirror-main:
     name: Mirror upstream → fork main
