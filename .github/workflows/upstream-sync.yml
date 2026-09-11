@@ -1,0 +1,290 @@
+name: Upstream sync
+
+# 自动同步上游 FunAudioLLM/SenseVoice 到本 fork（siliconflow/SenseVoice）。
+# - Job sync-adaptation: 上游 main → 适配分支 feat/sf-gpu-function-adaptation
+#     冲突自动裁决（-X ours + DROP_PATHS rm + ours 删除侧 rm），
+#     建 PR 并 auto-merge，合并落地后显式 dispatch docker-build.yml 触发镜像构建。
+#     无法自动裁决时自动开 issue 报告冲突，本次同步中止（等人工处理）。
+# - Job mirror-main: 上游 main → 本 fork main（本 workflow 所在分支），
+#     正常为 fast-forward；异常时同样开 issue 兜底。
+#
+# ⚠ schedule 事件只在默认分支注册：本文件必须存在于 fork 的 main（默认分支）。
+#   （旧版曾误放适配分支，导致定时任务从未注册。）
+#
+# Token 策略：优先 secrets.SYNC_PAT（fork Settings → Actions secrets 配置，
+# repo scope），缺省回退 GITHUB_TOKEN。二者行为差异：
+#   - 纯 GITHUB_TOKEN：不触发其他 workflow 的 push/pull_request 递归事件
+#     （PR 无 CI 验证、合并 push 不触发构建）。本 workflow 已用显式
+#     workflow_dispatch 补齐 docker-build 链路——GitHub 对 dispatch 类事件
+#     不施加递归限制，因此无 PAT 也能全自动构建镜像。
+#   - SYNC_PAT：PR 带 docker-build 的 pull_request 验证，auto-merge 等 CI
+#     绿后再合并；合并 push 直接触发构建（dispatch 只作双保险）。
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 每天 UTC 02:00（北京时间 10:00）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '仅检查上游更新，不合并不建 PR（预演）'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: FunAudioLLM/SenseVoice
+  UPSTREAM_BRANCH: main
+  ADAPTATION_BRANCH: feat/sf-gpu-function-adaptation
+  # 上游维护但本 fork 不适用的文件（Dockerfile 契约不同 / 已被自有 CI 取代），空格分隔
+  DROP_PATHS: ".github/workflows/sensevoice-container.yml tests/test_container_contract.py"
+
+jobs:
+  sync-adaptation:
+    name: Sync upstream → adaptation
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout adaptation branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ADAPTATION_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "$UPSTREAM_BRANCH" --tags
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          MERGE_BASE=$(git merge-base HEAD "upstream/$UPSTREAM_BRANCH")
+          UPSTREAM_HEAD=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
+          NEW_COMMITS=$(git rev-list --count "${MERGE_BASE}..${UPSTREAM_HEAD}")
+          {
+            echo "merge_base=$MERGE_BASE"
+            echo "upstream_head=$UPSTREAM_HEAD"
+            echo "new_commits=$NEW_COMMITS"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '### Upstream check'
+            echo "- upstream HEAD: \`${UPSTREAM_HEAD:0:12}\`"
+            echo "- new commits: **$NEW_COMMITS** (since merge-base \`${MERGE_BASE:0:12}\`)"
+            echo
+            echo '```'
+            git log --oneline "${MERGE_BASE}..${UPSTREAM_HEAD}" | head -30
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$NEW_COMMITS" -eq 0 ]]; then
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo '::notice::No new upstream commits'
+          else
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Found $NEW_COMMITS new upstream commits"
+          fi
+
+      - name: Merge upstream with auto-adjudication
+        id: merge
+        if: steps.check.outputs.has_updates == 'true' && inputs.dry_run != 'true'
+        run: |
+          if git merge "upstream/$UPSTREAM_BRANCH" --no-edit -X ours; then
+            echo "resolved=auto" >> "$GITHUB_OUTPUT"
+            echo "::notice::Clean merge (inline -X ours)"
+            exit 0
+          fi
+
+          echo '::warning::Merge conflicts detected; applying DROP_PATHS / ours adjudication'
+          RESOLVED=() ; DROPPED=() ; KEPT_OURS=()
+          for path in $(git diff --name-only --diff-filter=U); do
+            case " $DROP_PATHS " in
+              *" $path "*)
+                git rm -f -- "$path"
+                DROPPED+=("$path") ;;
+              *)
+                # modify(delete) 冲突且 ours 侧为删除（无 stage#2）→ 维持删除
+                if [[ -z "$(git ls-files -u -- "$path" | awk '$3==2')" ]]; then
+                  git rm -f -- "$path"
+                  DROPPED+=("$path (ours deleted)")
+                else
+                  git checkout --ours -- "$path" && git add -- "$path"
+                  KEPT_OURS+=("$path")
+                fi ;;
+            esac
+          done
+
+          if [[ -n "$(git ls-files -u)" ]]; then
+            echo "::error::Residual conflicts after adjudication; opening issue"
+            gh issue create \
+              --title "upstream sync conflict: ${UPSTREAM_HEAD:0:7} needs manual merge" \
+              --body "$(cat <<ISSUE_EOF
+          ### 上游同步出现无法自动裁决的冲突
+
+          - upstream HEAD: \`${UPSTREAM_HEAD}\`
+          - new commits: ${NEW_COMMITS} (merge-base \`${MERGE_BASE}\`)
+
+          #### 上游新提交
+          \`\`\`
+          $(git log --oneline "${MERGE_BASE}..${UPSTREAM_HEAD}" | head -30)
+          \`\`\`
+
+          #### 自动裁决记录
+          - 已 DROP（不适用 fork）: ${DROPPED[*]:-（无）}
+          - 保留 ours（内容冲突）: ${KEPT_OURS[*]:-（无）}
+
+          #### 残余冲突（需人工裁决）
+          \`\`\`
+          $(git ls-files -u)
+          \`\`\`
+
+          本 run 已中止。请人工执行
+          \`git merge upstream/$UPSTREAM_BRANCH\`
+          并按适配分支既有取舍（见 ${ADAPTATION_BRANCH} 上历史 merge commit 说明）解决冲突，处理完成后可关闭本 issue。
+          ISSUE_EOF
+          )" || true
+            exit 1
+          fi
+
+          printf '%s\n' "${DROPPED[@]}" > /tmp/dropped.txt
+          printf '%s\n' "${KEPT_OURS[@]}" > /tmp/kept_ours.txt
+          git commit --no-edit
+          {
+            echo "resolved=adjudicated"
+            echo "dropped<<EOF_DROPPED" ; cat /tmp/dropped.txt ; echo "EOF_DROPPED"
+            echo "kept_ours<<EOF_KEPT" ; cat /tmp/kept_ours.txt ; echo "EOF_KEPT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bump VERSION
+        id: bump
+        if: steps.check.outputs.has_updates == 'true' && inputs.dry_run != 'true'
+        run: |
+          CURRENT=$(tr -d '[:space:]' < VERSION)
+          if [[ ! "$CURRENT" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::VERSION file malformed: '$CURRENT'"
+            exit 1
+          fi
+          NEW_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3]+1))"
+          printf '%s\n' "$NEW_VERSION" > VERSION
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          git add VERSION
+          git commit -m "chore: bump VERSION to $NEW_VERSION after upstream sync"
+          echo "::notice::VERSION $CURRENT → $NEW_VERSION"
+
+      - name: Push sync branch
+        id: push
+        if: steps.check.outputs.has_updates == 'true' && inputs.dry_run != 'true'
+        run: |
+          SYNC_BRANCH="sync/upstream-${UPSTREAM_HEAD:0:12}"
+          echo "sync_branch=$SYNC_BRANCH" >> "$GITHUB_OUTPUT"
+          git push --force-with-lease origin "HEAD:refs/heads/$SYNC_BRANCH"
+          echo "::notice::Pushed $SYNC_BRANCH"
+
+      - name: Create PR and enable auto-merge
+        id: pr
+        if: steps.check.outputs.has_updates == 'true' && inputs.dry_run != 'true'
+        run: |
+          SYNC_BRANCH="${{ steps.push.outputs.sync_branch }}"
+          BUILD_NOTE='（若未配置 SYNC_PAT，PR 不带 CI，auto-merge 立即生效；镜像构建由本 workflow 在合并落地后显式 dispatch。）'
+          if [[ "${{ steps.merge.outputs.resolved }}" == "adjudicated" ]]; then
+            ADJUDICATION="#### 冲突裁决记录（人工复查重点）
+          - 已 DROP: \`${{ steps.merge.outputs.dropped }}\`（上游维护但本 fork 不适用）
+          - 保留 ours: \`${{ steps.merge.outputs.kept_ours }}\`
+          - 纯 -X ours 内联消解的上游 hunk 未逐条记录，建议对共享大文件（如 api.py）抽样 diff。"
+          else
+            ADJUDICATION="合并干净（无冲突裁决）。"
+          fi
+          PR_URL=$(gh pr create \
+            --base "$ADAPTATION_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "sync: upstream ${UPSTREAM_HEAD:0:7} (+${{ steps.check.outputs.new_commits }} commits)" \
+            --body "$(cat <<PR_EOF
+          ## Summary
+
+          自动同步上游 \`${UPSTREAM_REPO}\`@\`${UPSTREAM_HEAD:0:12}\` 到 \`${ADAPTATION_BRANCH}\`。
+
+          $ADJUDICATION
+
+          VERSION bump → \`${{ steps.bump.outputs.version }}\`。
+
+          ### 上游新提交
+          \`\`\`
+          $(git log --oneline "${{ steps.check.outputs.merge_base }}..${UPSTREAM_HEAD}" | head -30)
+          \`\`\`
+
+          ### 后续
+          PR 合并后自动触发 \`docker-build.yml\` 双 GPU 镜像构建（tag 含 \`-v${{ steps.bump.outputs.version }}-\`）。
+
+          $BUILD_NOTE
+          PR_EOF
+          )") || { echo "::error::gh pr create failed"; exit 1; }
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "::notice::PR created: $PR_URL"
+          # auto-merge：带 CI 时等绿再合并，否则（GITHUB_TOKEN 无递归 PR 事件）立即合并
+          gh pr merge --auto --delete-branch --merge "$PR_URL"
+
+      - name: Trigger image build after merge
+        if: steps.check.outputs.has_updates == 'true' && inputs.dry_run != 'true'
+        run: |
+          PR_URL="${{ steps.pr.outputs.pr_url }}"
+          # --auto 在 checks pending 时立即返回，此处等待合并真正落地（上限 ~30 分钟）
+          STATE=OPEN
+          for _ in $(seq 1 90); do
+            STATE=$(gh pr view "$PR_URL" --json state --jq '.state' 2>/dev/null || echo UNKNOWN)
+            [[ "$STATE" == "MERGED" ]] && break
+            [[ "$STATE" == "CLOSED" || "$STATE" == "UNKNOWN" ]] && break
+            sleep 20
+          done
+          if [[ "$STATE" != "MERGED" ]]; then
+            echo "::warning::PR not merged within timeout (state=$STATE); skip dispatch. 手动构建: gh workflow run docker-build.yml --ref $ADAPTATION_BRANCH"
+            exit 0
+          fi
+          # GITHUB_TOKEN 不触发 push 类递归事件，但 workflow_dispatch 不受限：
+          # 显式 dispatch 补齐合并后的镜像构建链路（SYNC_PAT 场景下为双保险）。
+          gh workflow run docker-build.yml --ref "$ADAPTATION_BRANCH"
+          echo "::notice::Dispatched docker-build.yml on $ADAPTATION_BRANCH"
+
+      - name: Dry run summary
+        if: inputs.dry_run == 'true' && steps.check.outputs.has_updates == 'true'
+        run: echo '::notice::Dry run: ${{ steps.check.outputs.new_commits }} new upstream commits; no merge / no PR (see step summary)'
+
+  mirror-main:
+    name: Mirror upstream → fork main
+    runs-on: ubuntu-latest
+    if: inputs.dry_run != 'true'
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Mirror upstream main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "$UPSTREAM_BRANCH" --tags
+          if ! git merge "upstream/$UPSTREAM_BRANCH" --no-edit -X ours \
+              -m "Mirror upstream ${UPSTREAM_REPO}@$(git rev-parse --short upstream/$UPSTREAM_BRANCH)"; then
+            git merge --abort 2>/dev/null || true
+            gh issue create \
+              --title "upstream mirror conflict on main: manual merge required" \
+              --body "镜像 fork main 与上游冲突（预期为 fast-forward/-X ours 可解）。请人工处理；本 run 已中止。" || true
+            exit 1
+          fi
+          git push origin HEAD:main
+          echo "::notice::fork main mirrored to upstream $UPSTREAM_BRANCH"
