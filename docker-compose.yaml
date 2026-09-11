@@ -53,13 +53,10 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # No GPU reservation. A default one makes `docker compose up` fail on
+    # hosts without the NVIDIA runtime, which is the CPU path from upstream
+    # issue #339. GPU users should use `docker run --gpus all`
+    # (SENSEVOICE_DEVICE=cpu 时无需 GPU)。
     # K8s 优雅退出配置
     stop_grace_period: 35s  # 比 GRACEFUL_SHUTDOWN_TIMEOUT 稍长
     healthcheck:
@@ -88,14 +85,8 @@ services:
     ports:
       - "${API_PORT:-8001}:8000"
     restart: unless-stopped
-    deploy:
-      replicas: 1
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # GPU reservation 已移除：无 NVIDIA runtime 的宿主上 `docker compose up` 会失败
+    # （上游 issue #339 CPU 路径）。GPU 用户用 `docker run --gpus all`。
     profiles:
       - scale
 
