@@ -46,15 +46,11 @@ Online Demo:
 
 <a name="What's News"></a>
 # What's New 🔥
-- 2026/07: **FunASR 1.3.29 restores SenseVoice VAD segment timestamps** — when token timestamps and a punctuation model are unavailable, `sentence_timestamp=True` now returns every VAD region through `sentence_info`, so subtitle and clipping clients receive usable segment boundaries instead of an empty timeline. Install with `pip install -U "funasr==1.3.29"`. [Release notes](https://github.com/modelscope/FunASR/releases/tag/v1.3.29) · [PyPI](https://pypi.org/project/funasr/1.3.29/)
-- 2026/07: **FunASR 1.3.27 adds detected-language metadata for SenseVoice** — the OpenAI-compatible endpoint now reports detected `zh`, `en`, `yue`, `ja`, or `ko` in `verbose_json.language`. Install with `pip install -U "funasr==1.3.27"`. [Release notes](https://github.com/modelscope/FunASR/releases/tag/v1.3.27) · [API guide](https://www.funasr.com/en/blog/funasr-v1-3-27-language-metadata-vllm-fallback.html) · [PyPI](https://pypi.org/project/funasr/1.3.27/)
-- 2026/06: **SenseVoice on llama.cpp / GGUF** — run it on CPU/edge as a single self-contained binary (whisper.cpp-style), built-in VAD, no Python at runtime. The q8 model is only ~254 MB with the same accuracy. [runtime/llama.cpp/](./runtime/llama.cpp/) · [Releases](https://github.com/QwenAudio/SenseVoice/releases) · [GGUF on Hugging Face](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF)
-- 2026/05: FunASR can compose SenseVoiceSmall with separate FSMN-VAD, CAM++, and punctuation models to produce per-sentence speaker labels. Diarization is not a native SenseVoiceSmall checkpoint output. Requires installing FunASR from source: `pip install git+https://github.com/modelscope/FunASR.git`
-- 2024/11: Add support for timestamp based on the CTC alignment.
-- 2024/7: Added Export Features for [ONNX](./demo_onnx.py) and [libtorch](./demo_libtorch.py), as well as Python Version Runtimes: [funasr-onnx-0.4.0](https://pypi.org/project/funasr-onnx/), [funasr-torch-0.1.1](https://pypi.org/project/funasr-torch/)
-- 2024/7: The [SenseVoice-Small](https://www.modelscope.cn/models/iic/SenseVoiceSmall) voice understanding model is open-sourced, which offers high-precision multilingual speech recognition, emotion recognition, and audio event detection capabilities for Mandarin, Cantonese, English, Japanese, and Korean and leads to exceptionally low inference latency.  
-- 2024/7: The CosyVoice for natural speech generation with multi-language, timbre, and emotion control. CosyVoice excels in multi-lingual voice generation, zero-shot voice generation, cross-lingual voice cloning, and instruction-following capabilities. [CosyVoice repo](https://github.com/QwenAudio/CosyVoice) and [CosyVoice space](https://www.modelscope.cn/studios/iic/CosyVoice-300M).
-- 2024/7: [FunASR](https://github.com/modelscope/FunASR) is a fundamental speech recognition toolkit that offers a variety of features, including speech recognition (ASR), Voice Activity Detection (VAD), Punctuation Restoration, Language Models, Speaker Verification, Speaker Diarization and multi-talker ASR.
+- **Current deployment path:** install `funasr==1.4.14` for SenseVoice Python, OpenAI-compatible service, and container workflows. [Release notes](https://github.com/modelscope/FunASR/releases/tag/v1.4.14) · [SenseVoice releases](https://github.com/QwenAudio/SenseVoice/releases)
+- **Long audio without VAD:** `long_audio_no_vad.py` uses bounded overlapping windows and preserves raw chunk outputs, so hour-scale recordings do not require one unbounded GPU allocation. [Run it ->](./long_audio_no_vad.py)
+- **Integrated diarization alternative:** the wider FunASR ecosystem supports OpenMOSS/MOSS-Transcribe-Diarize for offline transcription, timestamps, and anonymous speaker labels without composing external VAD and speaker models. [Deployment guide ->](https://www.funasr.com/en/deploy/moss-transcribe-diarize.html)
+
+> See [Releases](https://github.com/QwenAudio/SenseVoice/releases) for the complete version history.
 
 <a name="Benchmarks"></a>
 # Benchmarks 📝
@@ -69,6 +65,8 @@ We compared the performance of multilingual speech recognition between SenseVoic
 ## Speech Emotion Recognition
 
 Due to the current lack of widely-used benchmarks and methods for speech emotion recognition, we conducted evaluations across various metrics on multiple test sets and performed a comprehensive comparison with numerous results from recent benchmarks. The selected test sets encompass data in both Chinese and English, and include multiple styles such as performances, films, and natural conversations. Without finetuning on the target data, SenseVoice was able to achieve and exceed the performance of the current best speech emotion recognition models.
+
+For a reproducible zero-shot CASIA or RAVDESS rerun, use the [SER evaluation contract](./benchmarks/ser/README.md). It reads the raw SenseVoice emotion tag and reports both UA and WA instead of deriving labels from formatted transcription text.
 
 <div align="center">  
 <img src="image/ser_table.png" width="1000" />
@@ -213,7 +211,17 @@ for sent in res[0]["sentence_info"]:
     print(f"Speaker {sent['spk']}: [{sent['start']}ms - {sent['end']}ms] {text}")
 ```
 
-> Note: Requires installing FunASR from source: `pip install git+https://github.com/modelscope/FunASR.git`
+Use the current repository `model.py` with FunASR 1.4.15 or newer. A local source
+update is needed when using `remote_code="./model.py"`; upgrading the Python
+package alone does not update that file. This composition was tested on a
+fixed public sample, not validated for diarization accuracy.
+
+With `output_timestamp=True`, `timestamp` contains `[start_ms, end_ms]` pairs
+aligned one-to-one with `words`. Older copies of this repository returned
+`[token, start_seconds, end_seconds]` triples, which are incompatible with
+FunASR's VAD timestamp aggregation. Direct callers must now read the token or
+word from `words`, not from `timestamp[i][0]`. See [demo2.py](./demo2.py).
+Speaker labels are anonymous clusters, not recognized personal identities.
 
 If all inputs are short audios (<30s), and batch inference is needed to speed up inference efficiency, the VAD model can be removed, and `batch_size` can be set accordingly.
 ```python
@@ -339,18 +347,22 @@ docker build -t sensevoice .
 
 ### Run (GPU – default)
 ```bash
-docker run --gpus all -p 50000:50000 sensevoice
+docker run --rm --gpus all -p 50000:50000 -v sensevoice-models:/models sensevoice
 ```
 ### Run (CPU-only)
 ```bash
 docker run --rm -e SENSEVOICE_DEVICE=cpu -p 50000:50000 -v sensevoice-models:/models sensevoice
 ```
+
+The container listens on port 50000. After it is healthy, open `http://127.0.0.1:50000/docs`.
+
 ### Docker Compose
-Docker Compose provides an easier way to run SenseVoice with persistent model caching, networking etc. 
+Docker Compose builds the same image and keeps the model cache on the `sensevoice-models` volume. The default compose file does not request GPUs, so it starts on CPU hosts. For GPU, use the `docker run --gpus all` command above.
 
 ### Start Stack
 ```bash
 docker compose up --build
+# CPU is the default. Equivalent: SENSEVOICE_DEVICE=cpu docker compose up --build
 ```
 ### Data prepare
 
